@@ -355,34 +355,4 @@ Contribuições são bem-vindas! Para contribuir com o projeto:
 
 Este projeto está licenciado sob a Licença MIT. Veja o arquivo `LICENSE` para detalhes completos.
 
-## Suporte
-
-Para suporte e questões:
-
-- Abra uma issue no GitHub para bugs e solicitações de features
-- Consulte a documentação da Oracle Cloud Infrastructure para questões específicas de OCI
-- Verifique a documentação do n8n e Node-RED para questões específicas dessas ferramentas
-
-## Roadmap
-
-### Próximas Funcionalidades
-
-- **Interface Web:** Dashboard para gerenciamento da plataforma
-- **Métricas Avançadas:** Integração com Prometheus e Grafana
-- **Multi-tenancy:** Suporte para múltiplos clientes/organizações
-- **Templates de Workflow:** Biblioteca de workflows pré-construídos
-- **API Gateway:** Funcionalidades avançadas de rate limiting e autenticação
-
-### Melhorias Planejadas
-
-- **Performance:** Otimizações para maior throughput
-- **Segurança:** Implementação de OAuth2 e JWT
-- **Escalabilidade:** Suporte para deployment em Kubernetes
-- **Monitoramento:** Dashboards de observabilidade integrados
-
----
-
-**Desenvolvido por:** Manus AI  
-**Versão:** 1.0.0  
-**Última Atualização:** Janeiro 2025
 
