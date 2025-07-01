@@ -33,7 +33,7 @@ A configuração inclui volumes persistentes para garantir que dados importantes
 |------------|-------|---------|-----------|
 | **Proxy GenAI** | 8000 | api.xptoai.com.br | Proxy Flask para serviços OCI GenAI |
 | **n8n** | 5678 | n8n.xptoai.com.br | Plataforma de automação de workflows |
-| **Node-RED** | 1880 | - | Programação visual para IoT e automação |
+| **Node-RED** | 1880 | nodered.xptoai.com.br | Programação visual para IoT e automação |
 | **Traefik** | 80/443 | - | Reverse proxy e load balancer |
 
 ### Fluxo de Dados
