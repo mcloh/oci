@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, json, jsonify
 import oci
 import requests
 
@@ -85,11 +85,75 @@ def ask_agent(region, agent_endpoint_id, session_id, user_message):
     response.raise_for_status() # Levanta um erro para status codes 4xx/5xx
     return response.json()
 
+def call_inference_model(region, compartment_id, model_id, prompt):
+    if TEST_MODE:
+        return {"response": f"Resposta simulada para o prompt: {prompt}"}
+
+    try:
+        endpoint = f"https://inference.generativeai.{region}.oci.oraclecloud.com"
+
+        generative_ai_inference_client = oci.generative_ai_inference.GenerativeAiInferenceClient(config=config, service_endpoint=endpoint, retry_strategy=oci.retry.NoneRetryStrategy(), timeout=(10,240))
+        chat_detail = oci.generative_ai_inference.models.ChatDetails()
+
+        content = oci.generative_ai_inference.models.TextContent()
+        content.text = f"{prompt}"
+        message = oci.generative_ai_inference.models.Message()
+        message.role = "USER"
+        message.content = [content]
+
+        chat_request = oci.generative_ai_inference.models.GenericChatRequest()
+        chat_request.api_format = oci.generative_ai_inference.models.BaseChatRequest.API_FORMAT_GENERIC
+        chat_request.messages = [message]
+        chat_request.max_tokens = 50000
+        chat_request.temperature = 1
+        #chat_request.frequency_penalty = 0
+        #chat_request.presence_penalty = 0
+        chat_request.top_p = 1
+        chat_request.top_k = 0
+
+        chat_detail.serving_mode = oci.generative_ai_inference.models.OnDemandServingMode(model_id=model_id)
+        chat_detail.chat_request = chat_request
+        chat_detail.compartment_id = compartment_id
+
+        chat_response = generative_ai_inference_client.chat(chat_detail)
+        chat_choices = chat_response.data.chat_response.choices
+        chat_data = {
+           "text": chat_choices[0].message.content[0].text,
+           "finish_reason": chat_choices[0].finish_reason
+        }
+        print(chat_data)
+
+        return {"response": chat_data}
+    except Exception as e:
+        return {"error": str(e)}
+
+def check_api_key():
+    expected_key = os.environ.get("API_KEY")
+    if not expected_key:
+        print("AVISO: API_KEY não configurada nas variáveis de ambiente.")
+        return  # passa sem autenticar (útil em dev, pode remover se quiser obrigar)
+    provided_key = request.headers.get("X-API-Key")
+    if provided_key != expected_key:
+        abort(401, description="Chave de API inválida ou ausente.")
+
+# Before all requests
+@app.before_request
+def before_all_requests():
+    check_api_key()
 
 # Endpoint para teste
 @app.route("/", methods=["GET"])
 def test():
     return jsonify({"test":"ok"})
+
+@app.route("/test/<myvar>/copy", methods=["GET"])
+def var_copy(myvar):
+    try:
+        print(f"myvar={myvar}")
+        return jsonify({"myvar":myvar})
+    except requests.exceptions.RequestException as e:
+        print(str(e))
+        return jsonify({"error": str(e)}), 400
 
 # Endpoint para criar nova sessão
 @app.route("/genai-agent/<region>/<agent_endpoint_id>/new-session", methods=["GET"])
@@ -114,6 +178,19 @@ def agent_chat(region, agent_endpoint_id, session_id):
         return jsonify({"agentResponse": response_data})
     except requests.exceptions.RequestException as e:
         print(str(e))
+        return jsonify({"error": str(e)}), 400
+
+# Endpoint para inferencia direta com GenAI
+@app.route("/genai/<region>/<compartment_id>/<model_id>/inference", methods=["POST"])
+def inference(region, compartment_id, model_id):
+    data = request.get_json()
+    prompt = data.get("prompt")
+    if not prompt:
+        return jsonify({"error": "Campo 'prompt' é obrigatório."}), 400
+    try:
+        response_data = call_inference_model(region, compartment_id, model_id, prompt)
+        return jsonify(response_data)
+    except requests.exceptions.RequestException as e:
         return jsonify({"error": str(e)}), 400
 
 if __name__ == '__main__':
