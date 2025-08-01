@@ -1,17 +1,22 @@
-from flask import Flask, request, json, jsonify
+from flask import Flask, request, jsonify, abort
 import oci
 import requests
+import os
+from datetime import datetime, timedelta
 
 app = Flask(__name__)
 
-# Função para carregar configurações do arquivo
+# --------------------------
+# Configuração
+# --------------------------
+
 def load_config(config_file="/home/app/credentials.conf"):
     config = {}
     try:
         with open(config_file, 'r') as f:
             for line in f:
                 line = line.strip()
-                if line and not line.startswith('#'):  # Ignora linhas vazias e comentários
+                if line and not line.startswith('#'):
                     key, value = line.split('=', 1)
                     config[key.strip()] = value.strip()
         return config
@@ -20,13 +25,9 @@ def load_config(config_file="/home/app/credentials.conf"):
     except Exception as e:
         raise Exception(f"Erro ao carregar configuração: {str(e)}")
 
-# Carrega configuração do arquivo
 config = load_config()
-
-# Modo de teste (define se deve usar credenciais reais ou simuladas)
 TEST_MODE = config.get("test_mode", "false").lower() == "true"
 
-# Cria o signer do OCI (apenas se não estiver em modo de teste)
 signer = None
 if not TEST_MODE:
     try:
@@ -43,33 +44,85 @@ if not TEST_MODE:
         print("Executando em modo de teste...")
         TEST_MODE = True
 
-# Funções de interação com o agente (adaptadas do agent_proxy.py)
-def new_session_agent(region, agent_endpoint_id):
-    if TEST_MODE:
-        # Retorna uma resposta simulada em modo de teste
-        return {"id": f"test_session_{agent_endpoint_id[:8]}"}
+# --------------------------
+# Session Store
+# --------------------------
 
-    session = requests.Session()
-    session.auth = signer
-    url = (
-        f"https://agent-runtime.generativeai.{region}.oci.oraclecloud.com/20240531/agentEndpoints/{agent_endpoint_id}/sessions"
-    )
-    payload = {
-        "description": "",
-        "displayName": "",
-        "idleTimeoutInSeconds": "1200"
-    }
-    resp = session.post(url, json=payload)
-    resp.raise_for_status() # Levanta um erro para status codes 4xx/5xx
-    return resp.json()
+SESSION_STORE = {}
+SESSION_TTL = timedelta(hours=2)
+
+def session_controller(region, agent_endpoint_id, channel, cuid):
+    """
+    Controla sessões com o agente, reaproveitando se estiver dentro do TTL (2h).
+    A cada interação, a sessão é renovada (sliding TTL).
+    """
+    session_key = f"{channel}:{cuid}"
+    now = datetime.utcnow()
+
+    existing = SESSION_STORE.get(session_key)
+    if existing:
+        last_used = existing["lastUsedAt"]
+        if now - last_used < SESSION_TTL:
+            existing["lastUsedAt"] = now
+            return {
+                "id": existing["sessionId"],
+                "sessionKey": session_key,
+                "reused": True
+            }
+
+    # Sessão expirada ou inexistente → cria nova
+    if TEST_MODE:
+        new_session_id = f"test_session_{agent_endpoint_id[:8]}_{int(now.timestamp())}"
+        SESSION_STORE[session_key] = {
+            "sessionId": new_session_id,
+            "createdAt": now,
+            "lastUsedAt": now,
+            "sessionKey": session_key
+        }
+        return {
+            "id": new_session_id,
+            "sessionKey": session_key,
+            "reused": False
+        }
+
+    try:
+        session = requests.Session()
+        session.auth = signer
+        url = (
+            f"https://agent-runtime.generativeai.{region}.oci.oraclecloud.com/20240531/"
+            f"agentEndpoints/{agent_endpoint_id}/sessions"
+        )
+        payload = {
+            "description": f"Session for {session_key}",
+            "displayName": session_key,
+            "idleTimeoutInSeconds": str(int(SESSION_TTL.total_seconds()))
+        }
+        resp = session.post(url, json=payload)
+        resp.raise_for_status()
+        data = resp.json()
+
+        SESSION_STORE[session_key] = {
+            "sessionId": data.get("id"),
+            "createdAt": now,
+            "lastUsedAt": now,
+            "sessionKey": session_key
+        }
+        data["sessionKey"] = session_key
+        data["reused"] = False
+        return data
+    except Exception as e:
+        return {"error": str(e), "sessionKey": session_key}
+
+# --------------------------
+# Funções de interação
+# --------------------------
 
 def ask_agent(region, agent_endpoint_id, session_id, user_message):
     if TEST_MODE:
-        # Retorna uma resposta simulada em modo de teste
         return {
             "message": f"Resposta simulada para: {user_message}",
             "sessionId": session_id,
-            "timestamp": "2024-01-01T00:00:00Z"
+            "timestamp": datetime.utcnow().isoformat() + "Z"
         }
 
     session = requests.Session()
@@ -82,7 +135,7 @@ def ask_agent(region, agent_endpoint_id, session_id, user_message):
         "sessionId": session_id
     }
     response = session.post(chat_url, json=payload)
-    response.raise_for_status() # Levanta um erro para status codes 4xx/5xx
+    response.raise_for_status()
     return response.json()
 
 def call_inference_model(region, compartment_id, model_id, prompt):
@@ -92,7 +145,12 @@ def call_inference_model(region, compartment_id, model_id, prompt):
     try:
         endpoint = f"https://inference.generativeai.{region}.oci.oraclecloud.com"
 
-        generative_ai_inference_client = oci.generative_ai_inference.GenerativeAiInferenceClient(config=config, service_endpoint=endpoint, retry_strategy=oci.retry.NoneRetryStrategy(), timeout=(10,240))
+        generative_ai_inference_client = oci.generative_ai_inference.GenerativeAiInferenceClient(
+            config=config,
+            service_endpoint=endpoint,
+            retry_strategy=oci.retry.NoneRetryStrategy(),
+            timeout=(10, 240)
+        )
         chat_detail = oci.generative_ai_inference.models.ChatDetails()
 
         content = oci.generative_ai_inference.models.TextContent()
@@ -106,8 +164,6 @@ def call_inference_model(region, compartment_id, model_id, prompt):
         chat_request.messages = [message]
         chat_request.max_tokens = 50000
         chat_request.temperature = 1
-        #chat_request.frequency_penalty = 0
-        #chat_request.presence_penalty = 0
         chat_request.top_p = 1
         chat_request.top_k = 0
 
@@ -118,80 +174,77 @@ def call_inference_model(region, compartment_id, model_id, prompt):
         chat_response = generative_ai_inference_client.chat(chat_detail)
         chat_choices = chat_response.data.chat_response.choices
         chat_data = {
-           "text": chat_choices[0].message.content[0].text,
-           "finish_reason": chat_choices[0].finish_reason
+            "text": chat_choices[0].message.content[0].text,
+            "finish_reason": chat_choices[0].finish_reason
         }
-        print(chat_data)
 
         return {"response": chat_data}
     except Exception as e:
         return {"error": str(e)}
 
+# --------------------------
+# Segurança
+# --------------------------
+
 def check_api_key():
     expected_key = os.environ.get("API_KEY")
     if not expected_key:
         print("AVISO: API_KEY não configurada nas variáveis de ambiente.")
-        return  # passa sem autenticar (útil em dev, pode remover se quiser obrigar)
+        return
     provided_key = request.headers.get("X-API-Key")
     if provided_key != expected_key:
         abort(401, description="Chave de API inválida ou ausente.")
 
-# Before all requests
 @app.before_request
 def before_all_requests():
     check_api_key()
 
-# Endpoint para teste
+# --------------------------
+# Endpoints
+# --------------------------
+
 @app.route("/", methods=["GET"])
 def test():
-    return jsonify({"test":"ok"})
+    return jsonify({"test": "ok"})
 
 @app.route("/test/<myvar>/copy", methods=["GET"])
 def var_copy(myvar):
-    try:
-        print(f"myvar={myvar}")
-        return jsonify({"myvar":myvar})
-    except requests.exceptions.RequestException as e:
-        print(str(e))
-        return jsonify({"error": str(e)}), 400
+    return jsonify({"myvar": myvar})
 
-# Endpoint para criar nova sessão
-@app.route("/genai-agent/<region>/<agent_endpoint_id>/new-session", methods=["GET"])
-def new_session(region, agent_endpoint_id):
-    try:
-        response_data = new_session_agent(region, agent_endpoint_id)
-        return jsonify({"sessionId": response_data.get("id")})
-    except requests.exceptions.RequestException as e:
-        print(str(e))
-        return jsonify({"error": str(e)}), 400
+@app.route("/genai-agent/<region>/<agent_endpoint_id>/session", methods=["POST"])
+def manage_session(region, agent_endpoint_id):
+    """
+    Reaproveita ou cria uma sessão nova com base em channel + cuid.
+    """
+    data = request.get_json()
+    channel = data.get("channel")
+    cuid = data.get("cuid")
+    if not all([channel, cuid]):
+        return jsonify({"error": "Parâmetros 'channel' e 'cuid' são obrigatórios"}), 400
+    response_data = session_controller(region, agent_endpoint_id, channel, cuid)
+    return jsonify(response_data)
 
-# Endpoint para chat com o agente
 @app.route("/genai-agent/<region>/<agent_endpoint_id>/<session_id>/chat", methods=["POST"])
 def agent_chat(region, agent_endpoint_id, session_id):
     data = request.get_json()
     user_message = data.get("userMessage")
-    if not all([user_message]):
-        print("missing userMessage")
+    if not user_message:
         return jsonify({"error": "userMessage é obrigatório"}), 400
-    try:
-        response_data = ask_agent(region, agent_endpoint_id, session_id, user_message)
-        return jsonify({"agentResponse": response_data})
-    except requests.exceptions.RequestException as e:
-        print(str(e))
-        return jsonify({"error": str(e)}), 400
+    response_data = ask_agent(region, agent_endpoint_id, session_id, user_message)
+    return jsonify({"agentResponse": response_data})
 
-# Endpoint para inferencia direta com GenAI
 @app.route("/genai/<region>/<compartment_id>/<model_id>/inference", methods=["POST"])
 def inference(region, compartment_id, model_id):
     data = request.get_json()
     prompt = data.get("prompt")
     if not prompt:
         return jsonify({"error": "Campo 'prompt' é obrigatório."}), 400
-    try:
-        response_data = call_inference_model(region, compartment_id, model_id, prompt)
-        return jsonify(response_data)
-    except requests.exceptions.RequestException as e:
-        return jsonify({"error": str(e)}), 400
+    response_data = call_inference_model(region, compartment_id, model_id, prompt)
+    return jsonify(response_data)
+
+# --------------------------
+# Main
+# --------------------------
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8000)
