@@ -25,7 +25,7 @@ Carregar o modelo `all-MiniLM-L12-v2.onnx` a partir de um bucket no Oracle Objec
 DECLARE 
     ONNX_MOD_FILE VARCHAR2(100) := 'all_MiniLM_L12_v2.onnx';
     MODNAME VARCHAR2(500);
-    LOCATION_URI VARCHAR2(300) := 'https://objectstorage.us-chicago-1.oraclecloud.com/p/YspaXeded3c3ShsteS31GeX_cNCcgUjDHzWt9lqevD9D7FlBRgC1a9vmzFE41X9X/n/idajmumkp9ca/b/lohmann-ai-br/o/LLM/';
+    LOCATION_URI VARCHAR2(300) := 'https://path/to/the/folder/where/the/model/file/is/available/';
 
 BEGIN
     DBMS_OUTPUT.PUT_LINE('ONNX model file name in Object Storage is: '||ONNX_MOD_FILE); 
