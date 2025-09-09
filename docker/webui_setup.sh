@@ -3,7 +3,7 @@
 docker stop webui && docker rm webui
 
 docker run -d \
-  -p 8080:8080
+  -p 8080:8080 \
   --name webui \
   --network traefik-net \
   --env-file webui.env \
