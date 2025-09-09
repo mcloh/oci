@@ -3,6 +3,8 @@ import oci
 import requests
 import os
 from datetime import datetime, timedelta
+import uuid
+import time
 
 app = Flask(__name__)
 
@@ -52,10 +54,6 @@ SESSION_STORE = {}
 SESSION_TTL = timedelta(hours=2)
 
 def session_controller(region, agent_endpoint_id, channel, cuid):
-    """
-    Controla sessões com o agente, reaproveitando se estiver dentro do TTL (2h).
-    A cada interação, a sessão é renovada (sliding TTL).
-    """
     session_key = f"{channel}:{cuid}"
     now = datetime.utcnow()
 
@@ -70,7 +68,6 @@ def session_controller(region, agent_endpoint_id, channel, cuid):
                 "reused": True
             }
 
-    # Sessão expirada ou inexistente → cria nova
     if TEST_MODE:
         new_session_id = f"test_session_{agent_endpoint_id[:8]}_{int(now.timestamp())}"
         SESSION_STORE[session_key] = {
@@ -114,33 +111,12 @@ def session_controller(region, agent_endpoint_id, channel, cuid):
         return {"error": str(e), "sessionKey": session_key}
 
 # --------------------------
-# Funções de interação
+# Inferência GenAI
 # --------------------------
-
-def ask_agent(region, agent_endpoint_id, session_id, user_message):
-    if TEST_MODE:
-        return {
-            "message": f"Resposta simulada para: {user_message}",
-            "sessionId": session_id,
-            "timestamp": datetime.utcnow().isoformat() + "Z"
-        }
-
-    session = requests.Session()
-    session.auth = signer
-    base_url = f"https://agent-runtime.generativeai.{region}.oci.oraclecloud.com/20240531"
-    chat_url = f"{base_url}/agentEndpoints/{agent_endpoint_id}/actions/chat"
-    payload = {
-        "userMessage": user_message,
-        "shouldStream": False,
-        "sessionId": session_id
-    }
-    response = session.post(chat_url, json=payload)
-    response.raise_for_status()
-    return response.json()
 
 def call_inference_model(region, compartment_id, model_id, prompt):
     if TEST_MODE:
-        return {"response": f"Resposta simulada para o prompt: {prompt}"}
+        return {"response": {"text": f"Resposta simulada: {prompt}", "finish_reason": "stop"}}
 
     try:
         endpoint = f"https://inference.generativeai.{region}.oci.oraclecloud.com"
@@ -151,71 +127,70 @@ def call_inference_model(region, compartment_id, model_id, prompt):
             retry_strategy=oci.retry.NoneRetryStrategy(),
             timeout=(10, 240)
         )
-        chat_detail = oci.generative_ai_inference.models.ChatDetails()
 
-        content = oci.generative_ai_inference.models.TextContent()
-        content.text = f"{prompt}"
-        message = oci.generative_ai_inference.models.Message()
-        message.role = "USER"
-        message.content = [content]
+        content = oci.generative_ai_inference.models.TextContent(text=prompt)
+        message = oci.generative_ai_inference.models.Message(role="USER", content=[content])
 
-        chat_request = oci.generative_ai_inference.models.GenericChatRequest()
-        chat_request.api_format = oci.generative_ai_inference.models.BaseChatRequest.API_FORMAT_GENERIC
-        chat_request.messages = [message]
-        chat_request.max_tokens = 50000
-        chat_request.temperature = 1
-        chat_request.top_p = 1
-        chat_request.top_k = 0
+        chat_request = oci.generative_ai_inference.models.GenericChatRequest(
+            api_format=oci.generative_ai_inference.models.BaseChatRequest.API_FORMAT_GENERIC,
+            messages=[message],
+            max_tokens=50000,
+            temperature=1,
+            top_p=1,
+            top_k=0
+        )
 
-        chat_detail.serving_mode = oci.generative_ai_inference.models.OnDemandServingMode(model_id=model_id)
-        chat_detail.chat_request = chat_request
-        chat_detail.compartment_id = compartment_id
+        chat_detail = oci.generative_ai_inference.models.ChatDetails(
+            serving_mode=oci.generative_ai_inference.models.OnDemandServingMode(model_id=model_id),
+            chat_request=chat_request,
+            compartment_id=compartment_id
+        )
 
         chat_response = generative_ai_inference_client.chat(chat_detail)
-        chat_choices = chat_response.data.chat_response.choices
-        chat_data = {
-            "text": chat_choices[0].message.content[0].text,
-            "finish_reason": chat_choices[0].finish_reason
-        }
+        choice = chat_response.data.chat_response.choices[0]
 
-        return {"response": chat_data}
+        return {"response": {
+            "text": choice.message.content[0].text,
+            "finish_reason": choice.finish_reason
+        }}
+
     except Exception as e:
         return {"error": str(e)}
 
 # --------------------------
-# Segurança
+# Autenticação
 # --------------------------
 
 def check_api_key():
     expected_key = os.environ.get("API_KEY")
     if not expected_key:
-        print("AVISO: API_KEY não configurada nas variáveis de ambiente.")
+        print("AVISO: API_KEY não configurada.")
         return
-    provided_key = request.headers.get("X-API-Key")
-    if provided_key != expected_key:
-        abort(401, description="Chave de API inválida ou ausente.")
+
+    auth_header = request.headers.get("Authorization", "")
+    token = ""
+    if auth_header.startswith("Bearer "):
+        token = auth_header.split("Bearer ")[1].strip()
+    else:
+        token = request.headers.get("X-API-Key")
+
+    if token != expected_key:
+        abort(401, description="API key inválida.")
 
 @app.before_request
 def before_all_requests():
     check_api_key()
 
 # --------------------------
-# Endpoints
+# Endpoints REST
 # --------------------------
 
 @app.route("/", methods=["GET"])
 def test():
-    return jsonify({"test": "ok"})
-
-@app.route("/test/<myvar>/copy", methods=["GET"])
-def var_copy(myvar):
-    return jsonify({"myvar": myvar})
+    return jsonify({"status": "ok"})
 
 @app.route("/genai-agent/<region>/<agent_endpoint_id>/session", methods=["POST"])
 def manage_session(region, agent_endpoint_id):
-    """
-    Reaproveita ou cria uma sessão nova com base em channel + cuid.
-    """
     data = request.get_json()
     channel = data.get("channel")
     cuid = data.get("cuid")
@@ -230,8 +205,23 @@ def agent_chat(region, agent_endpoint_id, session_id):
     user_message = data.get("userMessage")
     if not user_message:
         return jsonify({"error": "userMessage é obrigatório"}), 400
-    response_data = ask_agent(region, agent_endpoint_id, session_id, user_message)
-    return jsonify({"agentResponse": response_data})
+
+    try:
+        base_url = f"https://agent-runtime.generativeai.{region}.oci.oraclecloud.com/20240531"
+        chat_url = f"{base_url}/agentEndpoints/{agent_endpoint_id}/actions/chat"
+        session_obj = requests.Session()
+        session_obj.auth = signer
+        payload = {
+            "userMessage": user_message,
+            "shouldStream": False,
+            "sessionId": session_id
+        }
+        response = session_obj.post(chat_url, json=payload)
+        response.raise_for_status()
+        return jsonify({"agentResponse": response.json()})
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/genai/<region>/<compartment_id>/<model_id>/inference", methods=["POST"])
 def inference(region, compartment_id, model_id):
@@ -239,11 +229,90 @@ def inference(region, compartment_id, model_id):
     prompt = data.get("prompt")
     if not prompt:
         return jsonify({"error": "Campo 'prompt' é obrigatório."}), 400
+
     response_data = call_inference_model(region, compartment_id, model_id, prompt)
     return jsonify(response_data)
 
+@app.route("/genai/<region>/<compartment_id>/<model_id>/v1/chat/completions", methods=["POST"])
+def openai_compatible_chat(region, compartment_id, model_id):
+    data = request.get_json()
+    messages = data.get("messages", [])
+    temperature = data.get("temperature", 1)
+    top_p = data.get("top_p", 1)
+    top_k = data.get("top_k", 0)
+    max_tokens = data.get("max_tokens", 1000)
+
+    user_prompt = next((m["content"] for m in reversed(messages) if m["role"] == "user"), None)
+    if not user_prompt:
+        return jsonify({"error": "mensagem do usuário é obrigatória"}), 400
+
+    response = call_inference_model(region, compartment_id, model_id, user_prompt)
+    if "error" in response:
+        return jsonify({"error": response["error"]}), 500
+
+    result_text = response["response"]["text"]
+    finish_reason = response["response"].get("finish_reason", "stop")
+
+    return jsonify({
+        "id": f"chatcmpl-{uuid.uuid4().hex[:12]}",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": model_id,
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": result_text},
+                "finish_reason": finish_reason
+            }
+        ]
+    })
+
+@app.route("/genai/<region>/<compartment_id>/<model_id>/v1/completions", methods=["POST"])
+def openai_compatible_completion(region, compartment_id, model_id):
+    data = request.get_json()
+    prompt = data.get("prompt")
+    temperature = data.get("temperature", 1)
+    top_p = data.get("top_p", 1)
+    top_k = data.get("top_k", 0)
+    max_tokens = data.get("max_tokens", 1000)
+    stop = data.get("stop")
+
+    if not prompt:
+        return jsonify({"error": "Campo 'prompt' é obrigatório."}), 400
+
+    response = call_inference_model(region, compartment_id, model_id, prompt)
+    if "error" in response:
+        return jsonify({"error": response["error"]}), 500
+
+    result_text = response["response"]["text"]
+    finish_reason = response["response"].get("finish_reason", "stop")
+
+    if stop:
+        if isinstance(stop, list):
+            for s in stop:
+                if s in result_text:
+                    result_text = result_text.split(s)[0]
+                    break
+        elif isinstance(stop, str) and stop in result_text:
+            result_text = result_text.split(stop)[0]
+
+    return jsonify({
+        "id": f"cmpl-{uuid.uuid4().hex[:12]}",
+        "object": "text_completion",
+        "created": int(time.time()),
+        "model": model_id,
+        "choices": [
+            {
+                "index": 0,
+                "text": result_text,
+                "logprobs": None,
+                "finish_reason": finish_reason
+            }
+        ]
+    })
+
 # --------------------------
-# Main
+# Inicialização
 # --------------------------
 
 if __name__ == '__main__':
