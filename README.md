@@ -13,7 +13,7 @@ O projeto utiliza uma arquitetura de microserviços baseada em Docker, com Traef
 ### Proxy GenAI para OCI
 O componente central da plataforma é um proxy Flask que atua como intermediário entre aplicações cliente e os serviços GenAI da Oracle Cloud Infrastructure. Este proxy oferece autenticação automática via SDK OCI, simplificando significativamente o processo de integração com os serviços de IA da Oracle.
 
-O proxy implementa endpoints RESTful para criação de sessões de agentes IA e comunicação via chat, permitindo que aplicações interajam com modelos de linguagem avançados de forma transparente. Além disso, inclui um modo de teste que facilita o desenvolvimento e debugging, retornando respostas simuladas quando necessário.
+O proxy implementa endpoints RESTful (também compatíveis com OpenAI/v1) para criação de sessões de agentes IA e comunicação via chat, permitindo que aplicações interajam com modelos de linguagem avançados de forma transparente. Além disso, inclui um modo de teste que facilita o desenvolvimento e debugging, retornando respostas simuladas quando necessário.
 
 ### Plataforma de Automação Integrada
 A solução incorpora duas poderosas ferramentas de automação que se complementam para diferentes casos de uso. O n8n oferece uma interface visual intuitiva para criação de workflows complexos, permitindo integração com centenas de serviços e APIs diferentes. Por sua vez, o Node-RED fornece capacidades especializadas para programação visual, especialmente útil para projetos de IoT e automação industrial.
@@ -34,6 +34,7 @@ A configuração inclui volumes persistentes para garantir que dados importantes
 | **Proxy GenAI** | 8000 | api.xptoai.com.br | Proxy Flask para serviços OCI GenAI |
 | **n8n** | 5678 | n8n.xptoai.com.br | Plataforma de automação de workflows |
 | **Node-RED** | 1880 | nodered.xptoai.com.br | Programação visual para IoT e automação |
+| **Open Web UI** | 8080 | chat.xptoai.com.br | Interface de Chat com múltiplos LLMs |
 | **Traefik** | 80/443 | - | Reverse proxy e load balancer |
 
 ### Fluxo de Dados
@@ -55,10 +56,12 @@ oci/
 │   ├── api_setup.sh           # Script setup da API
 │   ├── n8n_setup.sh           # Script setup do n8n
 │   ├── nodered_setup.sh       # Script setup do Node-RED
+│   ├── webui_setup.sh         # Script setup do Open Web UI
 │   ├── create_volumes.sh      # Criação de volumes Docker
 │   ├── open_ports.sh          # Configuração de firewall
-│   ├── n8n.env               # Variáveis ambiente n8n
-│   └── nodered.env           # Variáveis ambiente Node-RED
+│   ├── n8n.env                # Variáveis ambiente n8n
+│   ├── webui.env              # Variáveis ambiente Open Web UI
+│   └── nodered.env            # Variáveis ambiente Node-RED
 └── README.md
 ```
 
@@ -132,6 +135,7 @@ Antes de iniciar a instalação, certifique-se de que seu ambiente atende aos se
    ./docker/api_setup.sh
    ./docker/n8n_setup.sh
    ./docker/nodered_setup.sh
+   ./docker/webui_setup.sh
    ```
 
 ### Configuração Avançada
