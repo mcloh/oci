@@ -63,6 +63,23 @@ if not TEST_MODE:
         TEST_MODE = True
 
 # ==========================
+# Segurança API
+# ==========================
+
+def check_api_key():
+    expected_key = os.environ.get("API_KEY")
+    if not expected_key:
+        print("AVISO: API_KEY não configurada nas variáveis de ambiente.")
+        return
+    provided_key = request.headers.get("X-API-Key")
+    if provided_key != expected_key:
+        abort(401, description="Chave de API inválida ou ausente.")
+
+@app.before_request
+def before_all_requests():
+    check_api_key()
+
+# ==========================
 # Variáveis de Bucket / Uploads
 # ==========================
 
@@ -85,23 +102,6 @@ if not TEST_MODE:
 
 # Session store para mapear file_id -> object_name (para fallback de download)
 FILE_INDEX: Dict[str, str] = {}
-
-# ==========================
-# Segurança API
-# ==========================
-
-def check_api_key():
-    expected_key = os.environ.get("API_KEY")
-    if not expected_key:
-        print("AVISO: API_KEY não configurada nas variáveis de ambiente.")
-        return
-    provided_key = request.headers.get("X-API-Key")
-    if provided_key != expected_key:
-        abort(401, description="Chave de API inválida ou ausente.")
-
-@app.before_request
-def before_all_requests():
-    check_api_key()
 
 # ==========================
 # Helpers: Signed URL (PAR) + Upload
