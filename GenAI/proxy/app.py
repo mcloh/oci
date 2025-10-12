@@ -2,12 +2,16 @@
 # -----------------------------------------------------------------------------
 # Requisitos:
 #   pip install flask oci requests pillow
+#   # (recomendado p/ CORS em produção)
+#   pip install flask-cors
 # Execução:
 #   export API_KEY="minha-chave"
 #   export GENAI_BUCKET="lohmann-ai-br"
 #   export GENAI_UPLOAD_PREFIX="genai-uploads/"
 #   # opcional: onde está o JSON dos modelos
 #   export LLM_CONFIG_PATH="/home/app/llm_models.json"
+#   # opcional: debug da autenticação
+#   export DEBUG_AUTH=true
 #   python api.py  # porta 8000
 # -----------------------------------------------------------------------------
 
@@ -26,6 +30,30 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Generator
 
 app = Flask(__name__)
+
+# ==========================
+# CORS (habilita para OpenWebUI e browsers)
+# ==========================
+
+try:
+    from flask_cors import CORS
+    CORS(
+        app,
+        resources={r"/*": {"origins": "*"}},
+        supports_credentials=False,
+        allow_headers=["Content-Type", "Authorization", "X-API-Key", "X-Channel", "X-Cuid"],
+        expose_headers=["Content-Type", "Authorization", "X-API-Key"],
+        methods=["GET", "POST", "OPTIONS"]
+    )
+except Exception as _e:
+    print("AVISO: flask-cors não instalado; CORS mínimo será aplicado via after_request.")
+
+@app.after_request
+def add_cors_headers(resp):
+    resp.headers.setdefault("Access-Control-Allow-Origin", "*")
+    resp.headers.setdefault("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+    resp.headers.setdefault("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key, X-Channel, X-Cuid")
+    return resp
 
 # ==========================
 # Configuração e Autenticação OCI
@@ -69,42 +97,47 @@ if not TEST_MODE:
 # Segurança API
 # ==========================
 
+DEBUG_AUTH = os.environ.get("DEBUG_AUTH", "false").lower() == "true"
+
 def _safe_equals(a: str, b: str) -> bool:
     if a is None or b is None:
         return False
     return hmac.compare_digest(a, b)
 
 def _parse_bearer_token(auth_header: str) -> str:
-    # Suporta "Bearer <token>" (case-insensitive no prefixo).
+    # Suporta "Bearer <token>" (case-insensitive no prefixo). Opcionalmente aceita "Token <token>".
     if not auth_header:
         return ""
     parts = auth_header.strip().split()
-    if len(parts) == 2 and parts[0].lower() == "bearer":
+    if len(parts) == 2 and parts[0].lower() in ("bearer", "token"):
         return parts[1]
     return ""
 
 def check_api_key():
     expected_key = os.environ.get("API_KEY")
     if not expected_key:
-        # Sem chave configurada, não bloquear (mantém comportamento permissivo atual)
         print("AVISO: API_KEY não configurada nas variáveis de ambiente.")
         return
 
-    # 1) Suporte existente: X-API-Key
     provided_key = request.headers.get("X-API-Key")
-
-    # 2) Novo: Authorization: Bearer <API_KEY>
     auth_header = request.headers.get("Authorization")
     bearer_token = _parse_bearer_token(auth_header)
 
-    # Válido se QUALQUER um bater
+    if DEBUG_AUTH:
+        print(f"[auth] method={request.method} path={request.path} "
+              f"X-API-Key={'<set>' if provided_key else '<none>'} "
+              f"Authorization={'<set>' if auth_header else '<none>'}")
+
     if _safe_equals(provided_key, expected_key) or _safe_equals(bearer_token, expected_key):
         return
 
     abort(401, description="Credenciais inválidas ou ausentes. Use X-API-Key ou Authorization: Bearer.")
-    
+
 @app.before_request
 def before_all_requests():
+    # Permitir preflight CORS (OPTIONS) sem autenticação
+    if request.method == "OPTIONS":
+        return "", 204
     check_api_key()
 
 # ==========================
@@ -205,17 +238,16 @@ def get_signed_url_from_file_id(file_id: str, hours_valid: int = 24) -> Optional
 # Modelos — defaults e JSON externo (hot-reload)
 # ==========================
 
-# Defaults embutidos (fallback)
 SUPPORTED_MODELS_DEFAULTS: Dict[str, Dict[str, Any]] = {
-    "gpt5": { # OpenAI GPT-5
+    "gpt5": {  # OpenAI GPT-5
         "id": "ocid1.generativeaimodel.oc1.us-chicago-1.amaaaaaask7dceyasebknceb4ekbiaiisjtu3fj5i7s4io3ignvg4ip2uyma",
         "params": {"max_completion_tokens": 2048, "reasoning_effort": "MEDIUM", "verbosity": "MEDIUM"}
     },
-    "grok3mini": { # xAI Grok-3 Mini
+    "grok3mini": {  # xAI Grok-3 Mini
         "id": "ocid1.generativeaimodel.oc1.us-chicago-1.amaaaaaask7dceyavwbgai5nlntsd5hngaileroifuoec5qxttmydhq7mykq",
         "params": {"temperature": 1, "top_p": 1, "max_tokens": 600}
     },
-    "llama4maverick": { # Meta Llama-4 Maverick
+    "llama4maverick": {  # Meta Llama-4 Maverick
         "id": "ocid1.generativeaimodel.oc1.us-chicago-1.amaaaaaask7dceyayjawvuonfkw2ua4bob4rlnnlhs522pafbglivtwlfzta",
         "params": {"temperature": 1, "top_p": 0.75, "max_tokens": 600, "frequency_penalty": 0, "presence_penalty": 0}
     },
@@ -231,7 +263,7 @@ SUPPORTED_MODELS_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "id": "ocid1.generativeaimodel.oc1.us-chicago-1.amaaaaaask7dceya3eub3uksacl5q35mrigancv6rbppihlg7ihhjofyc22q",
         "params": {"temperature": 1, "top_p": 1, "top_k": 0, "max_tokens": 2048, "frequency_penalty": 0, "presence_penalty": 0}
     },
-    "grok4": { # xAI Grok-4
+    "grok4": {  # xAI Grok-4
         "id": "ocid1.generativeaimodel.oc1.us-chicago-1.amaaaaaask7dceya3bsfz4ogiuv3yc7gcnlry7gi3zzx6tnikg6jltqszm2q",
         "params": {"temperature": 1, "top_p": 1, "top_k": 0, "max_tokens": 20000}
     }
@@ -254,13 +286,11 @@ def get_supported_models() -> Dict[str, Dict[str, Any]]:
         with open(LLM_CONFIG_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
         models = data.get("models", {})
-        # Validação simples: precisa ter 'id' em cada modelo
         valid = {k: v for k, v in models.items() if isinstance(v, dict) and v.get("id")}
         if not valid:
             raise ValueError("Arquivo de modelos não contém 'models' válidos.")
         return valid
     except Exception as e:
-        # fallback nos defaults embutidos
         print(f"[warn] Usando SUPPORTED_MODELS_DEFAULTS (motivo: {e})")
         return SUPPORTED_MODELS_DEFAULTS
 
@@ -286,12 +316,12 @@ def session_controller(region, agent_endpoint_id, channel, cuid):
             existing["lastUsedAt"] = now
             return {"id": existing["sessionId"], "sessionKey": session_key, "reused": True}
 
-    # Sessão expirada ou inexistente → cria nova
     if TEST_MODE:
         new_session_id = f"test_session_{agent_endpoint_id[:8]}_{int(now.timestamp())}"
         SESSION_STORE[session_key] = {
             "sessionId": new_session_id, "createdAt": now, "lastUsedAt": now, "sessionKey": session_key
         }
+        print(f"[agent] nova sessão criada (TEST): key={session_key} id={new_session_id}")
         return {"id": new_session_id, "sessionKey": session_key, "reused": False}
 
     try:
@@ -313,11 +343,20 @@ def session_controller(region, agent_endpoint_id, channel, cuid):
         SESSION_STORE[session_key] = {
             "sessionId": data.get("id"), "createdAt": now, "lastUsedAt": now, "sessionKey": session_key
         }
+        print(f"[agent] nova sessão criada: key={session_key} id={data.get('id')}")
         data["sessionKey"] = session_key
         data["reused"] = False
         return data
     except Exception as e:
         return {"error": str(e), "sessionKey": session_key}
+
+def _invalidate_session(session_key: str):
+    try:
+        if session_key in SESSION_STORE:
+            del SESSION_STORE[session_key]
+            print(f"[agent] sessão invalidada: key={session_key}")
+    except Exception:
+        pass
 
 # ==========================
 # Funções de interação (Agente + Inference)
@@ -336,14 +375,33 @@ def ask_agent(region, agent_endpoint_id, session_id, user_message):
     base_url = f"https://agent-runtime.generativeai.{region}.oci.oraclecloud.com/20240531"
     chat_url = f"{base_url}/agentEndpoints/{agent_endpoint_id}/actions/chat"
     payload = {"userMessage": user_message, "shouldStream": False, "sessionId": session_id}
-    response = session.post(chat_url, json=payload)
-    response.raise_for_status()
-    return response.json()
+
+    try:
+        response = session.post(chat_url, json=payload)
+        status = response.status_code
+        text_body = None
+        try:
+            json_body = response.json()
+        except Exception:
+            json_body = None
+            text_body = response.text
+
+        if 200 <= status < 300:
+            return json_body if json_body is not None else {"message": text_body or ""}
+        else:
+            return {
+                "_http_status": status,
+                "_raw_text": text_body,
+                "_raw_json": json_body
+            }
+    except Exception as e:
+        return {
+            "_http_status": 0,
+            "error": f"Falha de rede ao chamar Agent: {e}"
+        }
 
 def call_inference_model(region, compartment_id, model_id, prompt):
     print(">>> /inference payload recebido:")
-    data = {"prompt": prompt, "region": region, "compartment_id": compartment_id, "model_id": model_id}
-
     if TEST_MODE:
         return {"response": f"Resposta simulada para o prompt: {prompt}"}
 
@@ -408,7 +466,7 @@ def resolve_model_and_params(body: Dict[str, Any], path_model_id: str) -> Dict[s
       3) path_model_id se for chave suportada ou OCID.
     Mescla defaults + overrides do corpo (OpenAI-like).
     """
-    supported = get_supported_models()  # HOT-RELOAD ⟵ lê JSON a cada chamada
+    supported = get_supported_models()  # HOT-RELOAD
     user_model = body.get("model")
     model_key = None
     model_ocid = None
@@ -437,7 +495,7 @@ def resolve_model_and_params(body: Dict[str, Any], path_model_id: str) -> Dict[s
         "temperature", "top_p", "top_k", "max_tokens", "frequency_penalty", "presence_penalty",
         "reasoning_effort", "verbosity", "max_completion_tokens"
     ]:
-        if k in body and body[k] is not None:
+        if k in body and k in body and body[k] is not None:
             overrides[k] = body[k]
 
     merged = {**defaults, **overrides}
@@ -508,7 +566,6 @@ def oci_chat_invoke(region: str, compartment_id: str, model_ocid: str, oci_paylo
         generic = oci.generative_ai_inference.models.GenericChatRequest()
         generic.api_format = oci.generative_ai_inference.models.BaseChatRequest.API_FORMAT_GENERIC
 
-        # Converte nosso payload em objetos do SDK
         sdk_messages = []
         for m in oci_payload["messages"]:
             sdk_msg = oci.generative_ai_inference.models.Message()
@@ -527,7 +584,6 @@ def oci_chat_invoke(region: str, compartment_id: str, model_ocid: str, oci_paylo
 
         generic.messages = sdk_messages
 
-        # Parâmetros
         if "temperature" in oci_payload: generic.temperature = oci_payload["temperature"]
         if "top_p" in oci_payload: generic.top_p = oci_payload["top_p"]
         if "top_k" in oci_payload: generic.top_k = oci_payload["top_k"]
@@ -584,6 +640,120 @@ def sse_chat_stream(model_label: str, full_text: str) -> Generator[str, None, No
     yield f"data: {json.dumps(endchunk)}\n\n"
     yield "data: [DONE]\n\n"
 
+# ===== Helpers OpenAI-v1 p/ Agents (sem session_id em URL) =====
+
+def _messages_to_text(messages: List[Dict[str, Any]]) -> str:
+    """
+    Concatena conteúdo textual de mensagens OpenAI-like para enviar a um GenAI Agent.
+    Ignora imagens/partes não-textuais. Mantém a ordem.
+    """
+    if not isinstance(messages, list):
+        return ""
+    chunks = []
+    for m in messages:
+        content = m.get("content", "")
+        if isinstance(content, str):
+            chunks.append(content)
+        elif isinstance(content, list):
+            for p in content:
+                if isinstance(p, dict) and p.get("type") == "text":
+                    t = p.get("text", "")
+                    if t:
+                        chunks.append(t)
+                elif isinstance(p, str):
+                    chunks.append(p)
+        elif content:
+            try:
+                chunks.append(json.dumps(content, ensure_ascii=False))
+            except Exception:
+                pass
+    return "\n".join(chunks).strip()
+
+def _coerce_to_text(val: Any) -> str:
+    if val is None:
+        return ""
+    if isinstance(val, str):
+        return val
+    try:
+        if isinstance(val, dict):
+            if isinstance(val.get("text"), str):
+                return val["text"]
+            if isinstance(val.get("content"), str):
+                return val["content"]
+            if isinstance(val.get("content"), dict) and isinstance(val["content"].get("text"), str):
+                return val["content"]["text"]
+            if isinstance(val.get("content"), list):
+                for c in val["content"]:
+                    if isinstance(c, dict) and isinstance(c.get("text"), str):
+                        return c["text"]
+            data = val.get("data")
+            if isinstance(data, dict):
+                for key in ("message", "output", "text"):
+                    if isinstance(data.get(key), str):
+                        return data[key]
+                if isinstance(data.get("content"), dict) and isinstance(data["content"].get("text"), str):
+                    return data["content"]["text"]
+                if isinstance(data.get("content"), list):
+                    for c in data["content"]:
+                        if isinstance(c, dict) and isinstance(c.get("text"), str):
+                            return c["text"]
+        return json.dumps(val, ensure_ascii=False)
+    except Exception:
+        return str(val)
+
+def _extract_agent_text(agent_payload: Any) -> str:
+    """
+    Extrai o texto principal de respostas de GenAI Agent em diferentes formatos,
+    incluindo {"role":"AGENT","content":{"text":"..."}}.
+    """
+    if agent_payload is None:
+        return ""
+    if isinstance(agent_payload, str):
+        try:
+            maybe_json = json.loads(agent_payload)
+            return _extract_agent_text(maybe_json)
+        except Exception:
+            return agent_payload
+
+    if isinstance(agent_payload, dict):
+        candidates = [
+            agent_payload.get("message"),
+            agent_payload.get("output"),
+            agent_payload.get("text"),
+            agent_payload.get("content"),
+            agent_payload.get("data"),
+            agent_payload.get("result"),
+        ]
+        for c in candidates:
+            if c is not None:
+                txt = _coerce_to_text(c)
+                if txt:
+                    return txt
+        return _coerce_to_text(agent_payload)
+
+    return _coerce_to_text(agent_payload)
+
+def _resolve_agent_session(region: str, agent_endpoint_id: str) -> Dict[str, Any]:
+    """
+    SEM session_id na URL. Cria/renova sessão automaticamente com base em:
+      - X-Channel (opcional, default "openai-v1")
+      - X-Cuid (opcional). Se ausente, deriva a partir do header de auth ou gera determinístico.
+    """
+    channel = request.headers.get("X-Channel") or "openai-v1"
+    cuid = request.headers.get("X-Cuid")
+    if not cuid:
+        seed = request.headers.get("Authorization") or request.headers.get("X-API-Key") or uuid.uuid4().hex
+        cuid = uuid.uuid5(uuid.NAMESPACE_OID, seed).hex
+    return session_controller(region, agent_endpoint_id, channel, cuid)
+
+def _agent_openai_like_answer(model_label: str, agent_payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Mapeia a resposta do Agent para o formato OpenAI chat.completion.
+    Garante que 'choices[0].message.content' seja SEMPRE string.
+    """
+    text = _extract_agent_text(agent_payload)
+    return to_openai_chat_response(model_label, text)
+
 # ==========================
 # Endpoints nativos 
 # ==========================
@@ -627,7 +797,7 @@ def inference(region, compartment_id, model_id):
     return jsonify(response_data)
 
 # ==========================
-# Endpoints OpenAI v1 compat — CHAT
+# Endpoints OpenAI v1 compat — CHAT (LLMs)
 # ==========================
 
 @app.route("/genai/<region>/<compartment_id>/<path_model_id>/v1/chat/completions", methods=["POST"])
@@ -659,7 +829,7 @@ def v1_chat_completions(region, compartment_id, path_model_id):
             oci_result.get("output_text")
             or oci_result.get("generated_text")
             or oci_result.get("inference_response", {}).get("output_text")
-            or oci_result.get("payload", {}).get("output_text")  # dry-run
+            or oci_result.get("payload", {}).get("output_text")
         )
     else:
         output_text = None
@@ -717,6 +887,109 @@ def v1_text_completions(region, compartment_id, path_model_id):
                         mimetype="text/event-stream")
 
     return jsonify(to_openai_text_response(model_label, output_text))
+
+# ==========================
+# OpenAI v1 compatibility — GenAI Agents (auto-sessão com retry 409)
+# ==========================
+
+@app.route("/genai-agent/<region>/<agent_endpoint_id>/v1/chat/completions", methods=["POST"])
+def agent_v1_chat_completions_auto(region, agent_endpoint_id):
+    """
+    OpenAI v1 compat (SEM session_id na URL): cria/renova uma sessão automaticamente.
+    Faz retry 1x em caso de 409 (sessão inválida/expirada).
+    """
+    try:
+        body = request.get_json(force=True, silent=False) or {}
+    except Exception as e:
+        return jsonify({"error": f"JSON inválido: {e}"}), 400
+
+    messages = body.get("messages")
+    if not messages or not isinstance(messages, list):
+        return jsonify({"error": "Campo 'messages' é obrigatório e deve ser uma lista."}), 400
+
+    # cria/renova sessão automaticamente (primeira tentativa)
+    sess = _resolve_agent_session(region, agent_endpoint_id)
+    if "error" in sess:
+        return jsonify({"error": f"Falha ao criar sessão: {sess['error']}"}), 500
+    session_id = sess.get("id")
+    session_key = sess.get("sessionKey") or ""
+
+    # extrai texto das mensagens OpenAI-like
+    user_message = _messages_to_text(messages)
+    if not user_message:
+        return jsonify({"error": "Não foi possível extrair texto de 'messages'."}), 400
+
+    # 1ª chamada ao Agent
+    agent_resp = ask_agent(region, agent_endpoint_id, session_id, user_message)
+
+    # Se veio erro 409, invalida e tenta 1x recriar sessão
+    if isinstance(agent_resp, dict) and agent_resp.get("_http_status") == 409:
+        print(f"[agent] 409 recebido. Invalidando sessão {session_key} e recriando...")
+        _invalidate_session(session_key)
+        sess2 = _resolve_agent_session(region, agent_endpoint_id)
+        if "error" in sess2:
+            return jsonify({
+                "error": {
+                    "message": f"Agent chat 409 e falha ao recriar sessão: {sess2['error']}",
+                    "type": "agent_session_error",
+                    "code": 409
+                }
+            }), 502
+        session_id = sess2.get("id")
+        agent_resp = ask_agent(region, agent_endpoint_id, session_id, user_message)
+
+    # Se ainda for erro HTTP (qualquer status), retornar erro amigável
+    if isinstance(agent_resp, dict) and agent_resp.get("_http_status"):
+        status = agent_resp.get("_http_status")
+        raw_json = agent_resp.get("_raw_json")
+        raw_text = agent_resp.get("_raw_text")
+        msg = None
+        if isinstance(raw_json, dict):
+            msg = raw_json.get("message") or raw_json.get("error") or raw_json.get("title")
+            if not msg:
+                msg = json.dumps(raw_json, ensure_ascii=False)
+        if not msg:
+            msg = raw_text or f"HTTP {status} do Agent."
+        return jsonify({
+            "error": {
+                "message": msg,
+                "type": "agent_http_error",
+                "code": status
+            }
+        }), 502
+
+    model_label = body.get("model") or f"agent:{agent_endpoint_id}"
+
+    # streaming
+    if body.get("stream") is True:
+        stream_text = _extract_agent_text(agent_resp)
+        return Response(stream_with_context(sse_chat_stream(model_label, stream_text)),
+                        mimetype="text/event-stream")
+
+    # normal
+    resp = _agent_openai_like_answer(model_label, agent_resp)
+    resp["_agent"] = {"session_id": session_id, "reused": sess.get("reused", False)}
+    return jsonify(resp)
+
+@app.route("/genai-agent/<region>/<agent_endpoint_id>/v1/models", methods=["GET"])
+def agent_v1_models(region, agent_endpoint_id):
+    """
+    Retorna a lista de modelos suportados para compatibilidade OpenAI/v1 (agents).
+    Estrutura idêntica à rota /genai/.../v1/models.
+    """
+    supported = get_supported_models()  # HOT-RELOAD do JSON externo
+    data = []
+    for k, v in supported.items():
+        data.append({
+            "id": k,
+            "object": "model",
+            "owned_by": "oci.genai.agent",
+            "ocid": v.get("id"),
+            "params": v.get("params", {}),
+            "region": region,
+            "agent_endpoint": agent_endpoint_id
+        })
+    return jsonify({"object": "list", "data": data})
 
 # ==========================
 # Endpoints OpenAI v1 — FILES
@@ -814,7 +1087,7 @@ def v1_images_variations(region=None, compartment_id=None, path_model_id=None):
     return jsonify({"created": int(time.time()), "data": [{"url": url, "note": "mock variation"}]})
 
 # ==========================
-# Endpoint OpenAI v1 /models
+# Endpoint OpenAI v1 /models (LLMs)
 # ==========================
 
 @app.route("/genai/<region>/<compartment_id>/<path_model_id>/v1/models", methods=["GET"])
