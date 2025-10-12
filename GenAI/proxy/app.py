@@ -21,6 +21,7 @@ import uuid
 import base64
 import time
 import mimetypes
+import hmac
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Generator
 
@@ -68,15 +69,40 @@ if not TEST_MODE:
 # Segurança API
 # ==========================
 
+def _safe_equals(a: str, b: str) -> bool:
+    if a is None or b is None:
+        return False
+    return hmac.compare_digest(a, b)
+
+def _parse_bearer_token(auth_header: str) -> str:
+    # Suporta "Bearer <token>" (case-insensitive no prefixo).
+    if not auth_header:
+        return ""
+    parts = auth_header.strip().split()
+    if len(parts) == 2 and parts[0].lower() == "bearer":
+        return parts[1]
+    return ""
+
 def check_api_key():
     expected_key = os.environ.get("API_KEY")
     if not expected_key:
+        # Sem chave configurada, não bloquear (mantém comportamento permissivo atual)
         print("AVISO: API_KEY não configurada nas variáveis de ambiente.")
         return
-    provided_key = request.headers.get("X-API-Key")
-    if provided_key != expected_key:
-        abort(401, description="Chave de API inválida ou ausente.")
 
+    # 1) Suporte existente: X-API-Key
+    provided_key = request.headers.get("X-API-Key")
+
+    # 2) Novo: Authorization: Bearer <API_KEY>
+    auth_header = request.headers.get("Authorization")
+    bearer_token = _parse_bearer_token(auth_header)
+
+    # Válido se QUALQUER um bater
+    if _safe_equals(provided_key, expected_key) or _safe_equals(bearer_token, expected_key):
+        return
+
+    abort(401, description="Credenciais inválidas ou ausentes. Use X-API-Key ou Authorization: Bearer.")
+    
 @app.before_request
 def before_all_requests():
     check_api_key()
