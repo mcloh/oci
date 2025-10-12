@@ -6,6 +6,8 @@
 #   export API_KEY="minha-chave"
 #   export GENAI_BUCKET="lohmann-ai-br"
 #   export GENAI_UPLOAD_PREFIX="genai-uploads/"
+#   # opcional: onde está o JSON dos modelos
+#   export LLM_CONFIG_PATH="/home/app/llm_models.json"
 #   python api.py  # porta 8000
 # -----------------------------------------------------------------------------
 
@@ -132,7 +134,6 @@ def create_par_for_object(object_name: str, hours_valid: int = 1) -> str:
         create_preauthenticated_request_details=details
     ).data
 
-    # access_uri começa com /p/...
     base = f"https://objectstorage.{region}.oraclecloud.com"
     return base + par.access_uri
 
@@ -175,37 +176,69 @@ def get_signed_url_from_file_id(file_id: str, hours_valid: int = 24) -> Optional
     return None
 
 # ==========================
-# Modelos suportados (defaults)
+# Modelos — defaults e JSON externo (hot-reload)
 # ==========================
 
-SUPPORTED_MODELS: Dict[str, Dict[str, Any]] = {
+# Defaults embutidos (fallback)
+SUPPORTED_MODELS_DEFAULTS: Dict[str, Dict[str, Any]] = {
+    # já existentes
     "gpt5": {
         "id": "ocid1.generativeaimodel.oc1.us-chicago-1.amaaaaaask7dceyasebknceb4ekbiaiisjtu3fj5i7s4io3ignvg4ip2uyma",
-        "params": {
-            "max_completion_tokens": 2048,
-            "reasoning_effort": "MEDIUM",
-            "verbosity": "MEDIUM"
-        }
+        "params": {"max_completion_tokens": 2048, "reasoning_effort": "MEDIUM", "verbosity": "MEDIUM"}
     },
     "grok3mini": {
         "id": "ocid1.generativeaimodel.oc1.us-chicago-1.amaaaaaask7dceyavwbgai5nlntsd5hngaileroifuoec5qxttmydhq7mykq",
-        "params": {
-            "temperature": 1,
-            "top_p": 1,
-            "max_tokens": 600
-        }
+        "params": {"temperature": 1, "top_p": 1, "max_tokens": 600}
     },
     "llama4maverick": {
         "id": "ocid1.generativeaimodel.oc1.us-chicago-1.amaaaaaask7dceyayjawvuonfkw2ua4bob4rlnnlhs522pafbglivtwlfzta",
-        "params": {
-            "temperature": 1,
-            "top_p": 0.75,
-            "max_tokens": 600,
-            "frequency_penalty": 0,
-            "presence_penalty": 0
-        }
+        "params": {"temperature": 1, "top_p": 0.75, "max_tokens": 600, "frequency_penalty": 0, "presence_penalty": 0}
+    },
+    # novos (pelos snippets)
+    "grokcode": {  # Grok-Code
+        "id": "ocid1.generativeaimodel.oc1.us-chicago-1.amaaaaaask7dceyasw26b5macw3kkrm5czk7ziblk5m7axkgnzrtrtp7ytqa",
+        "params": {"temperature": 1, "top_p": 1, "top_k": 0, "max_tokens": 600}
+    },
+    "commandrplus": {  # Command-R-Plus
+        "id": "ocid1.generativeaimodel.oc1.us-chicago-1.amaaaaaask7dceyaodm6rdyxmdzlddweh4amobzoo4fatlao2pwnekexmosq",
+        "params": {"temperature": 1, "top_p": 0.75, "top_k": 0, "max_tokens": 600, "frequency_penalty": 0}
+    },
+    "gptoss120": {  # GPT-OSS-120
+        "id": "ocid1.generativeaimodel.oc1.us-chicago-1.amaaaaaask7dceya3eub3uksacl5q35mrigancv6rbppihlg7ihhjofyc22q",
+        "params": {"temperature": 1, "top_p": 1, "top_k": 0, "max_tokens": 2048, "frequency_penalty": 0, "presence_penalty": 0}
+    },
+    "grok4": {
+        "id": "ocid1.generativeaimodel.oc1.us-chicago-1.amaaaaaask7dceya3bsfz4ogiuv3yc7gcnlry7gi3zzx6tnikg6jltqszm2q",
+        "params": {"temperature": 1, "top_p": 1, "top_k": 0, "max_tokens": 20000}
     }
 }
+
+LLM_CONFIG_PATH = os.environ.get("LLM_CONFIG_PATH", "/home/app/llm_models.json")
+
+def get_supported_models() -> Dict[str, Dict[str, Any]]:
+    """
+    Lê SEMPRE o JSON de modelos (hot-reload). Se ausente/ inválido, usa defaults embutidos.
+    Estrutura esperada:
+    {
+      "models": {
+        "apelido": { "id": "ocid1....", "params": {...} },
+        ...
+      }
+    }
+    """
+    try:
+        with open(LLM_CONFIG_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        models = data.get("models", {})
+        # Validação simples: precisa ter 'id' em cada modelo
+        valid = {k: v for k, v in models.items() if isinstance(v, dict) and v.get("id")}
+        if not valid:
+            raise ValueError("Arquivo de modelos não contém 'models' válidos.")
+        return valid
+    except Exception as e:
+        # fallback nos defaults embutidos
+        print(f"[warn] Usando SUPPORTED_MODELS_DEFAULTS (motivo: {e})")
+        return SUPPORTED_MODELS_DEFAULTS
 
 # ==========================
 # Session Store (Agente)
@@ -227,26 +260,15 @@ def session_controller(region, agent_endpoint_id, channel, cuid):
         last_used = existing["lastUsedAt"]
         if now - last_used < SESSION_TTL:
             existing["lastUsedAt"] = now
-            return {
-                "id": existing["sessionId"],
-                "sessionKey": session_key,
-                "reused": True
-            }
+            return {"id": existing["sessionId"], "sessionKey": session_key, "reused": True}
 
     # Sessão expirada ou inexistente → cria nova
     if TEST_MODE:
         new_session_id = f"test_session_{agent_endpoint_id[:8]}_{int(now.timestamp())}"
         SESSION_STORE[session_key] = {
-            "sessionId": new_session_id,
-            "createdAt": now,
-            "lastUsedAt": now,
-            "sessionKey": session_key
+            "sessionId": new_session_id, "createdAt": now, "lastUsedAt": now, "sessionKey": session_key
         }
-        return {
-            "id": new_session_id,
-            "sessionKey": session_key,
-            "reused": False
-        }
+        return {"id": new_session_id, "sessionKey": session_key, "reused": False}
 
     try:
         session = requests.Session()
@@ -265,10 +287,7 @@ def session_controller(region, agent_endpoint_id, channel, cuid):
         data = resp.json()
 
         SESSION_STORE[session_key] = {
-            "sessionId": data.get("id"),
-            "createdAt": now,
-            "lastUsedAt": now,
-            "sessionKey": session_key
+            "sessionId": data.get("id"), "createdAt": now, "lastUsedAt": now, "sessionKey": session_key
         }
         data["sessionKey"] = session_key
         data["reused"] = False
@@ -292,40 +311,27 @@ def ask_agent(region, agent_endpoint_id, session_id, user_message):
     session.auth = signer
     base_url = f"https://agent-runtime.generativeai.{region}.oci.oraclecloud.com/20240531"
     chat_url = f"{base_url}/agentEndpoints/{agent_endpoint_id}/actions/chat"
-    payload = {
-        "userMessage": user_message,
-        "shouldStream": False,
-        "sessionId": session_id
-    }
+    payload = {"userMessage": user_message, "shouldStream": False, "sessionId": session_id}
     response = session.post(chat_url, json=payload)
     response.raise_for_status()
     return response.json()
 
 def call_inference_model(region, compartment_id, model_id, prompt):
-    # DEBUG: imprimir o corpo recebido (pedido por você)
     print(">>> /inference payload recebido:")
     data = {"prompt": prompt, "region": region, "compartment_id": compartment_id, "model_id": model_id}
-    #print(data)
 
     if TEST_MODE:
         return {"response": f"Resposta simulada para o prompt: {prompt}"}
 
     try:
         endpoint = f"https://inference.generativeai.{region}.oci.oraclecloud.com"
-
         generative_ai_inference_client = oci.generative_ai_inference.GenerativeAiInferenceClient(
-            config=config,
-            service_endpoint=endpoint,
-            retry_strategy=oci.retry.NoneRetryStrategy(),
-            timeout=(10, 240)
+            config=config, service_endpoint=endpoint, retry_strategy=oci.retry.NoneRetryStrategy(), timeout=(10, 240)
         )
         chat_detail = oci.generative_ai_inference.models.ChatDetails()
 
-        content = oci.generative_ai_inference.models.TextContent()
-        content.text = f"{prompt}"
-        message = oci.generative_ai_inference.models.Message()
-        message.role = "USER"
-        message.content = [content]
+        content = oci.generative_ai_inference.models.TextContent(); content.text = f"{prompt}"
+        message = oci.generative_ai_inference.models.Message(); message.role = "USER"; message.content = [content]
 
         chat_request = oci.generative_ai_inference.models.GenericChatRequest()
         chat_request.api_format = oci.generative_ai_inference.models.BaseChatRequest.API_FORMAT_GENERIC
@@ -345,7 +351,6 @@ def call_inference_model(region, compartment_id, model_id, prompt):
             "text": chat_choices[0].message.content[0].text,
             "finish_reason": chat_choices[0].finish_reason
         }
-
         return {"response": chat_data}
     except Exception as e:
         return {"error": str(e)}
@@ -354,33 +359,21 @@ def call_inference_model(region, compartment_id, model_id, prompt):
 # Utilitários (OpenAI v1)
 # ==========================
 
-ROLE_MAP = {
-    "system": "SYSTEM",
-    "user": "USER",
-    "assistant": "ASSISTANT",
-}
+ROLE_MAP = {"system": "SYSTEM", "user": "USER", "assistant": "ASSISTANT"}
 
 def ensure_data_url(image_url: str) -> str:
-    """
-    Garante que a imagem seja uma data URL (base64).
-    Se já for data: retorna como está.
-    Se for http(s): baixa, infere MIME e converte para data URL.
-    """
     if not image_url:
         return image_url
     if image_url.startswith("data:"):
         return image_url
     try:
-        resp = requests.get(image_url, timeout=30)
-        resp.raise_for_status()
+        resp = requests.get(image_url, timeout=30); resp.raise_for_status()
         content = resp.content
-        # tenta inferir mime pelo header; fallback pela extensão
         mime = resp.headers.get("Content-Type") or guess_mime(image_url, "image/jpeg")
         b64 = base64.b64encode(content).decode("utf-8")
         return f"data:{mime};base64,{b64}"
     except Exception as e:
         print(f"[warn] Falha ao baixar imagem '{image_url}': {e}")
-        # retorna URL original (alguns modelos podem aceitar URL remota)
         return image_url
 
 def resolve_model_and_params(body: Dict[str, Any], path_model_id: str) -> Dict[str, Any]:
@@ -391,14 +384,15 @@ def resolve_model_and_params(body: Dict[str, Any], path_model_id: str) -> Dict[s
       3) path_model_id se for chave suportada ou OCID.
     Mescla defaults + overrides do corpo (OpenAI-like).
     """
+    supported = get_supported_models()  # HOT-RELOAD ⟵ lê JSON a cada chamada
     user_model = body.get("model")
     model_key = None
     model_ocid = None
 
-    if isinstance(user_model, str) and user_model in SUPPORTED_MODELS:
+    if isinstance(user_model, str) and user_model in supported:
         model_key = user_model
-        model_ocid = SUPPORTED_MODELS[user_model]["id"]
-        defaults = SUPPORTED_MODELS[user_model]["params"].copy()
+        model_ocid = supported[user_model]["id"]
+        defaults = supported[user_model].get("params", {}).copy()
     elif isinstance(user_model, str) and user_model.startswith("ocid1.generativeaimodel"):
         model_ocid = user_model
         defaults = {}
@@ -406,17 +400,17 @@ def resolve_model_and_params(body: Dict[str, Any], path_model_id: str) -> Dict[s
         if path_model_id and path_model_id.startswith("ocid1.generativeaimodel"):
             model_ocid = path_model_id
             defaults = {}
-        elif path_model_id in SUPPORTED_MODELS:
+        elif path_model_id in supported:
             model_key = path_model_id
-            model_ocid = SUPPORTED_MODELS[path_model_id]["id"]
-            defaults = SUPPORTED_MODELS[path_model_id]["params"].copy()
+            model_ocid = supported[path_model_id]["id"]
+            defaults = supported[path_model_id].get("params", {}).copy()
         else:
             raise ValueError("Modelo ausente ou não suportado: use um dos "
-                             f"{list(SUPPORTED_MODELS.keys())} ou forneça um OCID válido.")
+                             f"{list(supported.keys())} ou forneça um OCID válido.")
 
     overrides = {}
     for k in [
-        "temperature", "top_p", "max_tokens", "frequency_penalty", "presence_penalty",
+        "temperature", "top_p", "top_k", "max_tokens", "frequency_penalty", "presence_penalty",
         "reasoning_effort", "verbosity", "max_completion_tokens"
     ]:
         if k in body and body[k] is not None:
@@ -426,12 +420,6 @@ def resolve_model_and_params(body: Dict[str, Any], path_model_id: str) -> Dict[s
     return {"model_key": model_key, "model_ocid": model_ocid, "params": merged}
 
 def to_oci_messages(openai_messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """
-    Converte mensagens no formato OpenAI para um payload genérico (que depois vira objetos do SDK).
-    Suporta:
-      - content string
-      - content list com {type:"text", text:"..."} e {type:"image_url", image_url:{url:"..."}}
-    """
     oci_msgs: List[Dict[str, Any]] = []
     for m in openai_messages:
         role = ROLE_MAP.get(str(m.get("role", "")).lower(), "USER")
@@ -440,70 +428,45 @@ def to_oci_messages(openai_messages: List[Dict[str, Any]]) -> List[Dict[str, Any
         parts: List[Dict[str, Any]] = []
         if isinstance(content, list):
             for p in content:
-                # TEXT
                 if isinstance(p, dict) and p.get("type") == "text":
                     txt = p.get("text", "")
-                    if txt:
-                        parts.append({"type": "TEXT", "text": txt})
-                # IMAGE
+                    if txt: parts.append({"type": "TEXT", "text": txt})
                 elif isinstance(p, dict) and p.get("type") == "image_url":
-                    url = ""
-                    if isinstance(p.get("image_url"), dict):
-                        url = p.get("image_url", {}).get("url", "")
-                    elif isinstance(p.get("image_url"), str):
-                        url = p.get("image_url")
-                    if url:
+                    url = p.get("image_url", {})
+                    if isinstance(url, dict): url = url.get("url", "")
+                    if isinstance(url, str) and url:
                         data_url = ensure_data_url(url)
                         parts.append({"type": "IMAGE_URL", "url": data_url})
-                # strings soltas tratadas como texto
                 elif isinstance(p, str):
                     parts.append({"type": "TEXT", "text": p})
         elif isinstance(content, str):
             parts.append({"type": "TEXT", "text": content})
         else:
-            # fallback serialization
             parts.append({"type": "TEXT", "text": json.dumps(content, ensure_ascii=False)})
 
         oci_msgs.append({"role": role, "content": parts})
     return oci_msgs
 
 def build_oci_chat_payload(messages: List[Dict[str, Any]], params: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Monta o payload para /actions/chat da OCI (genérico).
-    """
     payload = {"messages": messages}
-
-    if "temperature" in params:
-        payload["temperature"] = params["temperature"]
-    if "top_p" in params:
-        payload["top_p"] = params["top_p"]
-    if "frequency_penalty" in params:
-        payload["frequency_penalty"] = params["frequency_penalty"]
-    if "presence_penalty" in params:
-        payload["presence_penalty"] = params["presence_penalty"]
-
+    if "temperature" in params: payload["temperature"] = params["temperature"]
+    if "top_p" in params: payload["top_p"] = params["top_p"]
+    if "top_k" in params: payload["top_k"] = params["top_k"]
+    if "frequency_penalty" in params: payload["frequency_penalty"] = params["frequency_penalty"]
+    if "presence_penalty" in params: payload["presence_penalty"] = params["presence_penalty"]
     if "max_completion_tokens" in params:
         payload["max_completion_tokens"] = params["max_completion_tokens"]
     elif "max_tokens" in params:
         payload["max_completion_tokens"] = params["max_tokens"]
-
-    if "reasoning_effort" in params:
-        payload["reasoning_effort"] = params["reasoning_effort"]
-    if "verbosity" in params:
-        payload["verbosity"] = params["verbosity"]
-
+    if "reasoning_effort" in params: payload["reasoning_effort"] = params["reasoning_effort"]
+    if "verbosity" in params: payload["verbosity"] = params["verbosity"]
     return payload
 
 def oci_chat_invoke(region: str, compartment_id: str, model_ocid: str, oci_payload: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Invoca o /actions/chat da OCI. Em TEST_MODE retorna dry-run.
-    Converte conteúdo TEXT/IMAGE_URL em TextContent/ImageContent do SDK.
-    """
     print(">>> OCI CHAT REQUEST (payload que será enviado):")
     print(json.dumps(oci_payload, ensure_ascii=False, indent=2))
 
     if TEST_MODE:
-        # Retorno simulado
         return {
             "dry_run": True,
             "note": "TEST_MODE=True — retorno simulado.",
@@ -514,10 +477,7 @@ def oci_chat_invoke(region: str, compartment_id: str, model_ocid: str, oci_paylo
     try:
         endpoint = f"https://inference.generativeai.{region}.oci.oraclecloud.com"
         client = oci.generative_ai_inference.GenerativeAiInferenceClient(
-            config=config,
-            service_endpoint=endpoint,
-            retry_strategy=oci.retry.NoneRetryStrategy(),
-            timeout=(10, 240)
+            config=config, service_endpoint=endpoint, retry_strategy=oci.retry.NoneRetryStrategy(), timeout=(10, 240)
         )
 
         chat_detail = oci.generative_ai_inference.models.ChatDetails()
@@ -533,31 +493,23 @@ def oci_chat_invoke(region: str, compartment_id: str, model_ocid: str, oci_paylo
             for c in m["content"]:
                 ctype = c.get("type")
                 if ctype == "TEXT":
-                    tc = oci.generative_ai_inference.models.TextContent()
-                    tc.text = c.get("text", "")
-                    parts.append(tc)
+                    tc = oci.generative_ai_inference.models.TextContent(); tc.text = c.get("text", ""); parts.append(tc)
                 elif ctype == "IMAGE_URL":
                     ic = oci.generative_ai_inference.models.ImageContent()
-                    iu = oci.generative_ai_inference.models.ImageUrl()
-                    iu.url = c.get("url", "")
-                    ic.image_url = iu
-                    parts.append(ic)
+                    iu = oci.generative_ai_inference.models.ImageUrl(); iu.url = c.get("url", "")
+                    ic.image_url = iu; parts.append(ic)
             sdk_msg.content = parts
             sdk_messages.append(sdk_msg)
 
         generic.messages = sdk_messages
 
         # Parâmetros
-        if "temperature" in oci_payload:
-            generic.temperature = oci_payload["temperature"]
-        if "top_p" in oci_payload:
-            generic.top_p = oci_payload["top_p"]
-        if "frequency_penalty" in oci_payload:
-            generic.frequency_penalty = oci_payload["frequency_penalty"]
-        if "presence_penalty" in oci_payload:
-            generic.presence_penalty = oci_payload["presence_penalty"]
-        if "max_completion_tokens" in oci_payload:
-            generic.max_tokens = oci_payload["max_completion_tokens"]
+        if "temperature" in oci_payload: generic.temperature = oci_payload["temperature"]
+        if "top_p" in oci_payload: generic.top_p = oci_payload["top_p"]
+        if "top_k" in oci_payload: generic.top_k = oci_payload["top_k"]
+        if "frequency_penalty" in oci_payload: generic.frequency_penalty = oci_payload["frequency_penalty"]
+        if "presence_penalty" in oci_payload: generic.presence_penalty = oci_payload["presence_penalty"]
+        if "max_completion_tokens" in oci_payload: generic.max_tokens = oci_payload["max_completion_tokens"]
 
         chat_detail.serving_mode = oci.generative_ai_inference.models.OnDemandServingMode(model_id=model_ocid)
         chat_detail.chat_request = generic
@@ -570,72 +522,41 @@ def oci_chat_invoke(region: str, compartment_id: str, model_ocid: str, oci_paylo
             choice = data.chat_response.choices[0]
             text = None
             if choice.message and choice.message.content:
-                # captura primeiro bloco de texto
                 for block in choice.message.content:
                     if hasattr(block, "text") and block.text:
-                        text = block.text
-                        break
+                        text = block.text; break
             return {"output_text": text, "raw": "sdk"}
         return {"output_text": None, "raw": "unknown"}
     except Exception as e:
         return {"error": f"Falha ao chamar OCI: {e}"}
 
 def to_openai_chat_response(model_label: str, content_text: str, finish_reason: str = "stop") -> Dict[str, Any]:
-    now = int(time.time())
-    rid = f"chatcmpl-{uuid.uuid4().hex[:24]}"
+    now = int(time.time()); rid = f"chatcmpl-{uuid.uuid4().hex[:24]}"
     return {
-        "id": rid,
-        "object": "chat.completion",
-        "created": now,
-        "model": model_label,
-        "choices": [
-            {
-                "index": 0,
-                "message": {"role": "assistant", "content": content_text},
-                "finish_reason": finish_reason
-            }
-        ],
+        "id": rid, "object": "chat.completion", "created": now, "model": model_label,
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": content_text}, "finish_reason": finish_reason}],
         "usage": {"prompt_tokens": None, "completion_tokens": None, "total_tokens": None}
     }
 
 def to_openai_text_response(model_label: str, content_text: str, finish_reason: str = "stop") -> Dict[str, Any]:
-    now = int(time.time())
-    rid = f"cmpl-{uuid.uuid4().hex[:24]}"
+    now = int(time.time()); rid = f"cmpl-{uuid.uuid4().hex[:24]}"
     return {
-        "id": rid,
-        "object": "text_completion",
-        "created": now,
-        "model": model_label,
-        "choices": [
-            {"index": 0, "text": content_text, "finish_reason": finish_reason, "logprobs": None}
-        ],
+        "id": rid, "object": "text_completion", "created": now, "model": model_label,
+        "choices": [{"index": 0, "text": content_text, "finish_reason": finish_reason, "logprobs": None}],
         "usage": {"prompt_tokens": None, "completion_tokens": None, "total_tokens": None}
     }
 
 def sse_chat_stream(model_label: str, full_text: str) -> Generator[str, None, None]:
-    """
-    Simula stream de deltas no formato OpenAI.
-    """
-    rid = f"chatcmpl-{uuid.uuid4().hex[:24]}"
-    now = int(time.time())
-    first = {
-        "id": rid, "object": "chat.completion.chunk", "created": now,
-        "model": model_label,
-        "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}]
-    }
+    rid = f"chatcmpl-{uuid.uuid4().hex[:24]}"; now = int(time.time())
+    first = {"id": rid, "object": "chat.completion.chunk", "created": now, "model": model_label,
+             "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}]}
     yield f"data: {json.dumps(first)}\n\n"
     for ch in full_text or "":
-        chunk = {
-            "id": rid, "object": "chat.completion.chunk", "created": now,
-            "model": model_label,
-            "choices": [{"index": 0, "delta": {"content": ch}, "finish_reason": None}]
-        }
+        chunk = {"id": rid, "object": "chat.completion.chunk", "created": now, "model": model_label,
+                 "choices": [{"index": 0, "delta": {"content": ch}, "finish_reason": None}]}
         yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
-    endchunk = {
-        "id": rid, "object": "chat.completion.chunk", "created": now,
-        "model": model_label,
-        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
-    }
+    endchunk = {"id": rid, "object": "chat.completion.chunk", "created": now, "model": model_label,
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}
     yield f"data: {json.dumps(endchunk)}\n\n"
     yield "data: [DONE]\n\n"
 
@@ -655,9 +576,7 @@ def var_copy(myvar):
 def manage_session(region, agent_endpoint_id):
     data = request.get_json() or {}
     print(">>> /genai-agent/.../session payload recebido:")
-    #print(data)
-    channel = data.get("channel")
-    cuid = data.get("cuid")
+    channel = data.get("channel"); cuid = data.get("cuid")
     if not all([channel, cuid]):
         return jsonify({"error": "Parâmetros 'channel' e 'cuid' são obrigatórios"}), 400
     response_data = session_controller(region, agent_endpoint_id, channel, cuid)
@@ -667,7 +586,6 @@ def manage_session(region, agent_endpoint_id):
 def agent_chat(region, agent_endpoint_id, session_id):
     data = request.get_json() or {}
     print(">>> /genai-agent/.../chat payload recebido:")
-    #print(data)
     user_message = data.get("userMessage")
     if not user_message:
         return jsonify({"error": "userMessage é obrigatório"}), 400
@@ -678,7 +596,6 @@ def agent_chat(region, agent_endpoint_id, session_id):
 def inference(region, compartment_id, model_id):
     data = request.get_json() or {}
     print(">>> /inference request body:")
-    #print(data)
     prompt = data.get("prompt")
     if not prompt:
         return jsonify({"error": "Campo 'prompt' é obrigatório."}), 400
@@ -709,11 +626,10 @@ def v1_chat_completions(region, compartment_id, path_model_id):
     if not isinstance(msgs, list) or not msgs:
         return jsonify({"error": "Campo 'messages' é obrigatório e deve ser uma lista."}), 400
 
-    # Suporte multimodal (text + image_url)
     oci_msgs = to_oci_messages(msgs)
     oci_payload = build_oci_chat_payload(oci_msgs, resolved["params"])
-
     oci_result = oci_chat_invoke(region, compartment_id, resolved["model_ocid"], oci_payload)
+
     if isinstance(oci_result, dict):
         output_text = (
             oci_result.get("output_text")
@@ -753,17 +669,12 @@ def v1_text_completions(region, compartment_id, path_model_id):
     if prompt is None:
         return jsonify({"error": "Campo 'prompt' é obrigatório."}), 400
 
-    # Compat: empacotar como chat com 1 mensagem user (texto)
-    if isinstance(prompt, list):
-        prompt_text = "\n".join([str(p) for p in prompt])
-    else:
-        prompt_text = str(prompt)
-
+    prompt_text = "\n".join([str(p) for p in prompt]) if isinstance(prompt, list) else str(prompt)
     msgs = [{"role": "user", "content": prompt_text}]
     oci_msgs = to_oci_messages(msgs)
     oci_payload = build_oci_chat_payload(oci_msgs, resolved["params"])
-
     oci_result = oci_chat_invoke(region, compartment_id, resolved["model_ocid"], oci_payload)
+
     if isinstance(oci_result, dict):
         output_text = (
             oci_result.get("output_text")
@@ -785,11 +696,9 @@ def v1_text_completions(region, compartment_id, path_model_id):
 
 # ==========================
 # Endpoints OpenAI v1 — FILES
-# (com e sem prefixo /genai/<region>/<compartment_id>/<model>)
 # ==========================
 
 def _files_upload_handler():
-    # Compatível com multipart/form-data (OpenAI clients)
     if "file" not in request.files:
         return jsonify({"error": "Campo 'file' é obrigatório"}), 400
     f = request.files["file"]
@@ -798,7 +707,6 @@ def _files_upload_handler():
 
 def _files_list_handler():
     if TEST_MODE:
-        # Lista fictícia em modo teste
         return jsonify({"data": [
             {"id": fid, "object": "file", "filename": os.path.basename(obj), "bytes": 0}
             for fid, obj in FILE_INDEX.items()
@@ -814,35 +722,23 @@ def _files_list_handler():
         })
     return jsonify({"data": files})
 
-# Sem prefixo
-#@app.route("/v1/files", methods=["POST"])
-#@app.route("/genai/v1/files", methods=["POST"])
 @app.route("/genai/<region>/<compartment_id>/<path_model_id>/v1/files", methods=["POST"])
 def v1_files_upload(region=None, compartment_id=None, path_model_id=None):
     return _files_upload_handler()
 
-#@app.route("/v1/files", methods=["GET"])
-#@app.route("/genai/v1/files", methods=["GET"])
 @app.route("/genai/<region>/<compartment_id>/<path_model_id>/v1/files", methods=["GET"])
 def v1_files_list(region=None, compartment_id=None, path_model_id=None):
     return _files_list_handler()
 
-#@app.route("/v1/files/<file_id>/content", methods=["GET"])
-#@app.route("/genai/v1/files/<file_id>/content", methods=["GET"])
 @app.route("/genai/<region>/<compartment_id>/<path_model_id>/v1/files/<file_id>/content", methods=["GET"])
 def v1_files_content(file_id, region=None, compartment_id=None, path_model_id=None):
-    """
-    Fallback para servir o conteúdo via Flask (caso cliente não use a signed URL).
-    """
     if TEST_MODE:
         return jsonify({"note": "TEST_MODE — conteúdo não disponível"}), 200
     obj = FILE_INDEX.get(file_id)
     if not obj:
         return jsonify({"error": "file_id não encontrado neste servidor"}), 404
-    # stream direto do Object Storage
     obj_resp = object_client.get_object(namespace, BUCKET_NAME, obj)
     data = obj_resp.data.content
-    # tentativa de inferir mime pelo nome armazenado
     filename = os.path.basename(obj)
     return send_file(
         io.BytesIO(data.read()),
@@ -856,9 +752,6 @@ def v1_files_content(file_id, region=None, compartment_id=None, path_model_id=No
 # ==========================
 
 def _store_image_bytes_and_return_url(image_bytes: bytes, filename: str) -> str:
-    """
-    Armazena bytes no bucket e retorna signed URL.
-    """
     if TEST_MODE:
         return f"https://objectstorage.{region}.oraclecloud.com/test/{UPLOAD_PREFIX}{uuid.uuid4().hex}_{filename}"
     object_name = f"{UPLOAD_PREFIX}{uuid.uuid4().hex}_{filename}"
@@ -867,57 +760,56 @@ def _store_image_bytes_and_return_url(image_bytes: bytes, filename: str) -> str:
     )
     return create_par_for_object(object_name, hours_valid=24)
 
-#@app.route("/v1/images/generations", methods=["POST"])
-#@app.route("/genai/v1/images/generations", methods=["POST"])
 @app.route("/genai/<region>/<compartment_id>/<path_model_id>/v1/images/generations", methods=["POST"])
 def v1_images_generations(region=None, compartment_id=None, path_model_id=None):
-    """
-    Geração de imagens a partir de prompt — placeholder.
-    Integração com serviço de geração de imagens pode ser plugada aqui.
-    Por ora, apenas armazena um 'mock' (PNG vazio) e retorna URL.
-    """
     body = request.form or request.get_json(force=True, silent=True) or {}
     prompt = body.get("prompt")
     if not prompt:
         return jsonify({"error": "Campo 'prompt' é obrigatório"}), 400
-
-    # MOCK: cria PNG vazio (1x1) — substitua por integração real de geração.
     png_bytes = base64.b64decode(
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHuwKp9w8H2AAAAABJRU5ErkJggg=="
     )
     url = _store_image_bytes_and_return_url(png_bytes, "generation.png")
     return jsonify({"created": int(time.time()), "data": [{"url": url}]})
 
-#@app.route("/v1/images/edits", methods=["POST"])
-#@app.route("/genai/v1/images/edits", methods=["POST"])
 @app.route("/genai/<region>/<compartment_id>/<path_model_id>/v1/images/edits", methods=["POST"])
 def v1_images_edits(region=None, compartment_id=None, path_model_id=None):
-    """
-    Edição de imagem — placeholder.
-    Espera multipart com 'image' (arquivo base) e 'prompt'.
-    """
     if "image" not in request.files:
         return jsonify({"error": "Campo 'image' (multipart) é obrigatório"}), 400
-    prompt = request.form.get("prompt", "")
+    _ = request.form.get("prompt", "")
     base_img = request.files["image"].read()
-    # MOCK: retorna a própria imagem (sem edição)
     url = _store_image_bytes_and_return_url(base_img, "edit.png")
     return jsonify({"created": int(time.time()), "data": [{"url": url, "note": "mock edit"}]})
 
-#@app.route("/v1/images/variations", methods=["POST"])
-#@app.route("/genai/v1/images/variations", methods=["POST"])
 @app.route("/genai/<region>/<compartment_id>/<path_model_id>/v1/images/variations", methods=["POST"])
 def v1_images_variations(region=None, compartment_id=None, path_model_id=None):
-    """
-    Variações de imagem — placeholder.
-    Espera multipart com 'image' (arquivo base).
-    """
     if "image" not in request.files:
         return jsonify({"error": "Campo 'image' (multipart) é obrigatório"}), 400
     base_img = request.files["image"].read()
-    # MOCK: retorna a própria imagem (sem variação)
     url = _store_image_bytes_and_return_url(base_img, "variation.png")
     return jsonify({"created": int(time.time()), "data": [{"url": url, "note": "mock variation"}]})
+
+# ==========================
+# Endpoint OpenAI v1 /models
+# ==========================
+
+@app.route("/genai/<region>/<compartment_id>/<path_model_id>/v1/models", methods=["GET"])
+def v1_models(region, compartment_id, path_model_id):
+    """
+    Lista os modelos disponíveis (do JSON hot-reload), em formato OpenAI-like.
+    Ignora path_model_id (mantido apenas para compat. com o padrão de URL existente).
+    """
+    supported = get_supported_models()
+    data = []
+    for k, v in supported.items():
+        data.append({
+            "id": k,             # expõe o apelido p/ uso direto em { model: "<apelido>" }
+            "object": "model",
+            "owned_by": "oci.genai",
+            "ocid": v.get("id"),
+            "params": v.get("params", {})
+        })
+    return jsonify({"object": "list", "data": data})
 
 # ==========================
 # Main
