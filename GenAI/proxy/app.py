@@ -181,7 +181,6 @@ def get_signed_url_from_file_id(file_id: str, hours_valid: int = 24) -> Optional
 
 # Defaults embutidos (fallback)
 SUPPORTED_MODELS_DEFAULTS: Dict[str, Dict[str, Any]] = {
-    # já existentes
     "gpt5": { # OpenAI GPT-5
         "id": "ocid1.generativeaimodel.oc1.us-chicago-1.amaaaaaask7dceyasebknceb4ekbiaiisjtu3fj5i7s4io3ignvg4ip2uyma",
         "params": {"max_completion_tokens": 2048, "reasoning_effort": "MEDIUM", "verbosity": "MEDIUM"}
