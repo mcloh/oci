@@ -182,32 +182,31 @@ def get_signed_url_from_file_id(file_id: str, hours_valid: int = 24) -> Optional
 # Defaults embutidos (fallback)
 SUPPORTED_MODELS_DEFAULTS: Dict[str, Dict[str, Any]] = {
     # já existentes
-    "gpt5": {
+    "gpt5": { # OpenAI GPT-5
         "id": "ocid1.generativeaimodel.oc1.us-chicago-1.amaaaaaask7dceyasebknceb4ekbiaiisjtu3fj5i7s4io3ignvg4ip2uyma",
         "params": {"max_completion_tokens": 2048, "reasoning_effort": "MEDIUM", "verbosity": "MEDIUM"}
     },
-    "grok3mini": {
+    "grok3mini": { # xAI Grok-3 Mini
         "id": "ocid1.generativeaimodel.oc1.us-chicago-1.amaaaaaask7dceyavwbgai5nlntsd5hngaileroifuoec5qxttmydhq7mykq",
         "params": {"temperature": 1, "top_p": 1, "max_tokens": 600}
     },
-    "llama4maverick": {
+    "llama4maverick": { # Meta Llama-4 Maverick
         "id": "ocid1.generativeaimodel.oc1.us-chicago-1.amaaaaaask7dceyayjawvuonfkw2ua4bob4rlnnlhs522pafbglivtwlfzta",
         "params": {"temperature": 1, "top_p": 0.75, "max_tokens": 600, "frequency_penalty": 0, "presence_penalty": 0}
     },
-    # novos (pelos snippets)
-    "grokcode": {  # Grok-Code
+    "grokcode": {  # xAI Grok-Code-Fast 1
         "id": "ocid1.generativeaimodel.oc1.us-chicago-1.amaaaaaask7dceyasw26b5macw3kkrm5czk7ziblk5m7axkgnzrtrtp7ytqa",
         "params": {"temperature": 1, "top_p": 1, "top_k": 0, "max_tokens": 600}
     },
-    "commandrplus": {  # Command-R-Plus
+    "commandrplus": {  # Cohere Command-R-Plus
         "id": "ocid1.generativeaimodel.oc1.us-chicago-1.amaaaaaask7dceyaodm6rdyxmdzlddweh4amobzoo4fatlao2pwnekexmosq",
         "params": {"temperature": 1, "top_p": 0.75, "top_k": 0, "max_tokens": 600, "frequency_penalty": 0}
     },
-    "gptoss120": {  # GPT-OSS-120
+    "gptoss120": {  # OpenAI GPT-OSS 120B
         "id": "ocid1.generativeaimodel.oc1.us-chicago-1.amaaaaaask7dceya3eub3uksacl5q35mrigancv6rbppihlg7ihhjofyc22q",
         "params": {"temperature": 1, "top_p": 1, "top_k": 0, "max_tokens": 2048, "frequency_penalty": 0, "presence_penalty": 0}
     },
-    "grok4": {
+    "grok4": { # xAI Grok-4
         "id": "ocid1.generativeaimodel.oc1.us-chicago-1.amaaaaaask7dceya3bsfz4ogiuv3yc7gcnlry7gi3zzx6tnikg6jltqszm2q",
         "params": {"temperature": 1, "top_p": 1, "top_k": 0, "max_tokens": 20000}
     }
