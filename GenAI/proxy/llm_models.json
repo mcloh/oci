@@ -2,31 +2,59 @@
   "models": {
     "gpt5": {
       "id": "ocid1.generativeaimodel.oc1.us-chicago-1.amaaaaaask7dceyasebknceb4ekbiaiisjtu3fj5i7s4io3ignvg4ip2uyma",
+      "compartmentId": "ocid1.compartment.oc1..aaaaaaaaxxxxxxxxxxx",
+      "region": "us-chicago-1",
+      "type": "model",
       "params": { "max_completion_tokens": 2048, "reasoning_effort": "MEDIUM", "verbosity": "MEDIUM" }
     },
     "grok3mini": {
       "id": "ocid1.generativeaimodel.oc1.us-chicago-1.amaaaaaask7dceyavwbgai5nlntsd5hngaileroifuoec5qxttmydhq7mykq",
+      "compartmentId": "ocid1.compartment.oc1..aaaaaaaaxxxxxxxxxxx",
+      "region": "us-chicago-1",
+      "type": "model",
       "params": { "temperature": 1, "top_p": 1, "max_tokens": 600 }
     },
     "llama4maverick": {
       "id": "ocid1.generativeaimodel.oc1.us-chicago-1.amaaaaaask7dceyayjawvuonfkw2ua4bob4rlnnlhs522pafbglivtwlfzta",
+      "compartmentId": "ocid1.compartment.oc1..aaaaaaaaxxxxxxxxxxx",
+      "region": "us-chicago-1",
+      "type": "model",
       "params": { "temperature": 1, "top_p": 0.75, "max_tokens": 600, "frequency_penalty": 0, "presence_penalty": 0 }
     },
     "grokcode": {
       "id": "ocid1.generativeaimodel.oc1.us-chicago-1.amaaaaaask7dceyasw26b5macw3kkrm5czk7ziblk5m7axkgnzrtrtp7ytqa",
+      "compartmentId": "ocid1.compartment.oc1..aaaaaaaaxxxxxxxxxxx",
+      "region": "us-chicago-1",
+      "type": "model",
       "params": { "temperature": 1, "top_p": 1, "top_k": 0, "max_tokens": 600 }
     },
     "commandrplus": {
       "id": "ocid1.generativeaimodel.oc1.us-chicago-1.amaaaaaask7dceyaodm6rdyxmdzlddweh4amobzoo4fatlao2pwnekexmosq",
+      "compartmentId": "ocid1.compartment.oc1..aaaaaaaaxxxxxxxxxxx",
+      "region": "us-chicago-1",
+      "type": "model",
       "params": { "temperature": 1, "top_p": 0.75, "top_k": 0, "max_tokens": 600, "frequency_penalty": 0 }
     },
     "gptoss120": {
       "id": "ocid1.generativeaimodel.oc1.us-chicago-1.amaaaaaask7dceya3eub3uksacl5q35mrigancv6rbppihlg7ihhjofyc22q",
+      "compartmentId": "ocid1.compartment.oc1..aaaaaaaaxxxxxxxxxxx",
+      "region": "us-chicago-1",
+      "type": "model",
       "params": { "temperature": 1, "top_p": 1, "top_k": 0, "max_tokens": 2048, "frequency_penalty": 0, "presence_penalty": 0 }
     },
     "grok4": {
       "id": "ocid1.generativeaimodel.oc1.us-chicago-1.amaaaaaask7dceya3bsfz4ogiuv3yc7gcnlry7gi3zzx6tnikg6jltqszm2q",
+      "compartmentId": "ocid1.compartment.oc1..aaaaaaaaxxxxxxxxxxx",
+      "region": "us-chicago-1",
+      "type": "model",
       "params": { "temperature": 1, "top_p": 1, "top_k": 0, "max_tokens": 20000 }
+    }
+    "my-agent": {
+      "id": "ocid1.genaiagentendpoint.oc1.us-chicago-1.amaaaaaask7dceyasebknceb4ekbiaiisjtu3fj5i7s4io3ignvg4ip2uyma",
+      "compartmentId": "ocid1.compartment.oc1..aaaaaaaaxxxxxxxxxxx",
+      "region": "us-chicago-1",
+      "type": "agent",
+      "params": {}
     }
   }
 }
