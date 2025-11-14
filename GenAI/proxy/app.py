@@ -1,18 +1,14 @@
 # api.py — OCI GenAI + OpenAI v1 Compatibility (files + images + multimodal)
 # -----------------------------------------------------------------------------
 # Requisitos:
-#   pip install flask oci requests pillow
-#   # (recomendado p/ CORS em produção)
-#   pip install flask-cors
+#   pip install flask oci requests pillow flask-cors
 # Execução:
 #   export API_KEY="minha-chave"
 #   export GENAI_BUCKET="lohmann-ai-br"
 #   export GENAI_UPLOAD_PREFIX="genai-uploads/"
-#   # opcional: onde está o JSON dos modelos
 #   export LLM_CONFIG_PATH="/home/app/llm_models.json"
-#   # opcional: debug da autenticação
-#   export DEBUG_AUTH=true
-#   python api.py  # porta 8000
+#   export DEBUG_AUTH=true  # opcional
+#   python app.py  # porta 8000
 # -----------------------------------------------------------------------------
 
 from flask import Flask, request, jsonify, abort, Response, stream_with_context, send_file
@@ -105,7 +101,6 @@ def _safe_equals(a: str, b: str) -> bool:
     return hmac.compare_digest(a, b)
 
 def _parse_bearer_token(auth_header: str) -> str:
-    # Suporta "Bearer <token>" (case-insensitive no prefixo). Opcionalmente aceita "Token <token>".
     if not auth_header:
         return ""
     parts = auth_header.strip().split()
@@ -135,7 +130,6 @@ def check_api_key():
 
 @app.before_request
 def before_all_requests():
-    # Permitir preflight CORS (OPTIONS) sem autenticação
     if request.method == "OPTIONS":
         return "", 204
     check_api_key()
@@ -161,7 +155,6 @@ if not TEST_MODE:
         print(f"Erro ao inicializar ObjectStorageClient: {e}")
         TEST_MODE = True
 
-# Session store para mapear file_id -> object_name (para fallback de download)
 FILE_INDEX: Dict[str, str] = {}
 
 # ==========================
@@ -172,13 +165,11 @@ def guess_mime(filename: str, default: str = "application/octet-stream") -> str:
     mt, _ = mimetypes.guess_type(filename)
     return mt or default
 
-def create_par_for_object(object_name: str, hours_valid: int = 1) -> str:
-    """
-    Cria um Pre-Authenticated Request (PAR) para leitura do objeto.
-    Retorna a URL completa (https://objectstorage.region.oraclecloud.com{accessUri})
-    """
+def create_par_for_object(object_name: str, hours_valid: int = 1, model_region: str = None) -> str:
+    """Cria PAR para leitura do objeto"""
+    target_region = model_region or region
     if TEST_MODE:
-        return f"https://objectstorage.{region}.oraclecloud.com/test/{object_name}"
+        return f"https://objectstorage.{target_region}.oraclecloud.com/test/{object_name}"
     expires = datetime.utcnow() + timedelta(hours=hours_valid)
     details = oci.object_storage.models.CreatePreauthenticatedRequestDetails(
         name=f"par-{uuid.uuid4().hex[:8]}",
@@ -192,14 +183,11 @@ def create_par_for_object(object_name: str, hours_valid: int = 1) -> str:
         bucket_name=BUCKET_NAME,
         create_preauthenticated_request_details=details
     ).data
-
-    base = f"https://objectstorage.{region}.oraclecloud.com"
+    base = f"https://objectstorage.{target_region}.oraclecloud.com"
     return base + par.access_uri
 
 def upload_file_to_bucket(file_storage, filename: str) -> Dict[str, Any]:
-    """
-    Faz upload do arquivo para o bucket e retorna metadata + signed URL (PAR).
-    """
+    """Upload de arquivo para bucket com PAR"""
     file_storage.stream.seek(0)
     content = file_storage.read()
     size = len(content)
@@ -220,68 +208,33 @@ def upload_file_to_bucket(file_storage, filename: str) -> Dict[str, Any]:
     url = create_par_for_object(object_name, hours_valid=24)
     file_id = f"file-{uuid.uuid4().hex[:12]}"
     FILE_INDEX[file_id] = object_name
-    return {
-        "id": file_id,
-        "object": "file",
-        "filename": filename,
-        "bytes": size,
-        "url": url
-    }
-
-def get_signed_url_from_file_id(file_id: str, hours_valid: int = 24) -> Optional[str]:
-    if file_id in FILE_INDEX:
-        obj = FILE_INDEX[file_id]
-        return create_par_for_object(obj, hours_valid=hours_valid) if not TEST_MODE else f"https://test/{obj}"
-    return None
+    return {"id": file_id, "object": "file", "filename": filename, "bytes": size, "url": url}
 
 # ==========================
-# Modelos — defaults e JSON externo (hot-reload)
+# Modelos — JSON externo (hot-reload) 
 # ==========================
-
-SUPPORTED_MODELS_DEFAULTS: Dict[str, Dict[str, Any]] = {
-    "gpt5": {  # OpenAI GPT-5
-        "id": "ocid1.generativeaimodel.oc1.us-chicago-1.amaaaaaask7dceyasebknceb4ekbiaiisjtu3fj5i7s4io3ignvg4ip2uyma",
-        "params": {"max_completion_tokens": 2048, "reasoning_effort": "MEDIUM", "verbosity": "MEDIUM"}
-    },
-    "grok3mini": {  # xAI Grok-3 Mini
-        "id": "ocid1.generativeaimodel.oc1.us-chicago-1.amaaaaaask7dceyavwbgai5nlntsd5hngaileroifuoec5qxttmydhq7mykq",
-        "params": {"temperature": 1, "top_p": 1, "max_tokens": 600}
-    },
-    "llama4maverick": {  # Meta Llama-4 Maverick
-        "id": "ocid1.generativeaimodel.oc1.us-chicago-1.amaaaaaask7dceyayjawvuonfkw2ua4bob4rlnnlhs522pafbglivtwlfzta",
-        "params": {"temperature": 1, "top_p": 0.75, "max_tokens": 600, "frequency_penalty": 0, "presence_penalty": 0}
-    },
-    "grokcode": {  # xAI Grok-Code-Fast 1
-        "id": "ocid1.generativeaimodel.oc1.us-chicago-1.amaaaaaask7dceyasw26b5macw3kkrm5czk7ziblk5m7axkgnzrtrtp7ytqa",
-        "params": {"temperature": 1, "top_p": 1, "top_k": 0, "max_tokens": 600}
-    },
-    "commandrplus": {  # Cohere Command-R-Plus
-        "id": "ocid1.generativeaimodel.oc1.us-chicago-1.amaaaaaask7dceyaodm6rdyxmdzlddweh4amobzoo4fatlao2pwnekexmosq",
-        "params": {"temperature": 1, "top_p": 0.75, "top_k": 0, "max_tokens": 600, "frequency_penalty": 0}
-    },
-    "gptoss120": {  # OpenAI GPT-OSS 120B
-        "id": "ocid1.generativeaimodel.oc1.us-chicago-1.amaaaaaask7dceya3eub3uksacl5q35mrigancv6rbppihlg7ihhjofyc22q",
-        "params": {"temperature": 1, "top_p": 1, "top_k": 0, "max_tokens": 2048, "frequency_penalty": 0, "presence_penalty": 0}
-    },
-    "grok4": {  # xAI Grok-4
-        "id": "ocid1.generativeaimodel.oc1.us-chicago-1.amaaaaaask7dceya3bsfz4ogiuv3yc7gcnlry7gi3zzx6tnikg6jltqszm2q",
-        "params": {"temperature": 1, "top_p": 1, "top_k": 0, "max_tokens": 20000}
-    }
-}
 
 LLM_CONFIG_PATH = os.environ.get("LLM_CONFIG_PATH", "/home/app/llm_models.json")
 
-def get_supported_models() -> Dict[str, Dict[str, Any]]:
-    """
-    Lê SEMPRE o JSON de modelos (hot-reload). Se ausente/ inválido, usa defaults embutidos.
-    Estrutura esperada:
-    {
-      "models": {
-        "apelido": { "id": "ocid1....", "params": {...} },
-        ...
-      }
+SUPPORTED_MODELS_DEFAULTS: Dict[str, Dict[str, Any]] = {
+    "gpt5": {
+        "id": "ocid1.generativeaimodel.oc1.us-chicago-1.amaaaaaask7dceyasebknceb4ekbiaiisjtu3fj5i7s4io3ignvg4ip2uyma",
+        "compartmentId": "ocid1.compartment.oc1..aaaaaaaaxxxxxxxxxxx",
+        "region": "us-chicago-1",
+        "type": "model",
+        "params": {"max_completion_tokens": 2048, "reasoning_effort": "MEDIUM", "verbosity": "MEDIUM"}
+    },
+    "my-agent": {
+        "id": "ocid1.genaiagentendpoint.oc1.us-chicago-1.amaaaaaask7dceyasebknceb4ekbiaiisjtu3fj5i7s4io3ignvg4ip2uyma",
+        "compartmentId": "ocid1.compartment.oc1..aaaaaaaaxxxxxxxxxxx",
+        "region": "us-chicago-1",
+        "type": "agent",
+        "params": {}
     }
-    """
+}
+
+def get_supported_models() -> Dict[str, Dict[str, Any]]:
+    """Lê JSON de modelos (hot-reload) com suporte a compartmentId, region e type"""
     try:
         with open(LLM_CONFIG_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -294,6 +247,13 @@ def get_supported_models() -> Dict[str, Dict[str, Any]]:
         print(f"[warn] Usando SUPPORTED_MODELS_DEFAULTS (motivo: {e})")
         return SUPPORTED_MODELS_DEFAULTS
 
+def get_model_config(model_name: str) -> Dict[str, Any]:
+    """Retorna configuração completa de um modelo pelo nome"""
+    supported = get_supported_models()
+    if model_name not in supported:
+        raise ValueError(f"Modelo '{model_name}' não encontrado. Modelos disponíveis: {list(supported.keys())}")
+    return supported[model_name]
+
 # ==========================
 # Session Store (Agente)
 # ==========================
@@ -302,10 +262,7 @@ SESSION_STORE = {}
 SESSION_TTL = timedelta(hours=2)
 
 def session_controller(region, agent_endpoint_id, channel, cuid):
-    """
-    Controla sessões com o agente, reaproveitando se estiver dentro do TTL (2h).
-    A cada interação, a sessão é renovada (sliding TTL).
-    """
+    """Controla sessões com agente (sliding TTL de 2h)"""
     session_key = f"{channel}:{cuid}"
     now = datetime.utcnow()
 
@@ -358,11 +315,8 @@ def _invalidate_session(session_key: str):
     except Exception:
         pass
 
-# ==========================
-# Funções de interação (Agente + Inference)
-# ==========================
-
 def ask_agent(region, agent_endpoint_id, session_id, user_message):
+    """Envia mensagem para agente OCI"""
     if TEST_MODE:
         return {
             "message": f"Resposta simulada para: {user_message}",
@@ -389,67 +343,23 @@ def ask_agent(region, agent_endpoint_id, session_id, user_message):
         if 200 <= status < 300:
             return json_body if json_body is not None else {"message": text_body or ""}
         else:
-            return {
-                "_http_status": status,
-                "_raw_text": text_body,
-                "_raw_json": json_body
-            }
+            return {"_http_status": status, "_raw_text": text_body, "_raw_json": json_body}
     except Exception as e:
-        return {
-            "_http_status": 0,
-            "error": f"Falha de rede ao chamar Agent: {e}"
-        }
-
-def call_inference_model(region, compartment_id, model_id, prompt):
-    print(">>> /inference payload recebido:")
-    if TEST_MODE:
-        return {"response": f"Resposta simulada para o prompt: {prompt}"}
-
-    try:
-        endpoint = f"https://inference.generativeai.{region}.oci.oraclecloud.com"
-        generative_ai_inference_client = oci.generative_ai_inference.GenerativeAiInferenceClient(
-            config=config, service_endpoint=endpoint, retry_strategy=oci.retry.NoneRetryStrategy(), timeout=(10, 240)
-        )
-        chat_detail = oci.generative_ai_inference.models.ChatDetails()
-
-        content = oci.generative_ai_inference.models.TextContent(); content.text = f"{prompt}"
-        message = oci.generative_ai_inference.models.Message(); message.role = "USER"; message.content = [content]
-
-        chat_request = oci.generative_ai_inference.models.GenericChatRequest()
-        chat_request.api_format = oci.generative_ai_inference.models.BaseChatRequest.API_FORMAT_GENERIC
-        chat_request.messages = [message]
-        chat_request.max_tokens = 50000
-        chat_request.temperature = 1
-        chat_request.top_p = 1
-        chat_request.top_k = 0
-
-        chat_detail.serving_mode = oci.generative_ai_inference.models.OnDemandServingMode(model_id=model_id)
-        chat_detail.chat_request = chat_request
-        chat_detail.compartment_id = compartment_id
-
-        chat_response = generative_ai_inference_client.chat(chat_detail)
-        chat_choices = chat_response.data.chat_response.choices
-        chat_data = {
-            "text": chat_choices[0].message.content[0].text,
-            "finish_reason": chat_choices[0].finish_reason
-        }
-        return {"response": chat_data}
-    except Exception as e:
-        return {"error": str(e)}
+        return {"_http_status": 0, "error": f"Falha de rede ao chamar Agent: {e}"}
 
 # ==========================
-# Utilitários (OpenAI v1)
+# Utilitários OpenAI v1
 # ==========================
 
 ROLE_MAP = {"system": "SYSTEM", "user": "USER", "assistant": "ASSISTANT"}
 
 def ensure_data_url(image_url: str) -> str:
-    if not image_url:
-        return image_url
-    if image_url.startswith("data:"):
+    """Converte URL de imagem para data URL (base64)"""
+    if not image_url or image_url.startswith("data:"):
         return image_url
     try:
-        resp = requests.get(image_url, timeout=30); resp.raise_for_status()
+        resp = requests.get(image_url, timeout=30)
+        resp.raise_for_status()
         content = resp.content
         mime = resp.headers.get("Content-Type") or guess_mime(image_url, "image/jpeg")
         b64 = base64.b64encode(content).decode("utf-8")
@@ -458,50 +368,8 @@ def ensure_data_url(image_url: str) -> str:
         print(f"[warn] Falha ao baixar imagem '{image_url}': {e}")
         return image_url
 
-def resolve_model_and_params(body: Dict[str, Any], path_model_id: str) -> Dict[str, Any]:
-    """
-    Resolve o OCID do modelo a partir de:
-      1) body['model'] se for chave suportada;
-      2) body['model'] se for OCID;
-      3) path_model_id se for chave suportada ou OCID.
-    Mescla defaults + overrides do corpo (OpenAI-like).
-    """
-    supported = get_supported_models()  # HOT-RELOAD
-    user_model = body.get("model")
-    model_key = None
-    model_ocid = None
-
-    if isinstance(user_model, str) and user_model in supported:
-        model_key = user_model
-        model_ocid = supported[user_model]["id"]
-        defaults = supported[user_model].get("params", {}).copy()
-    elif isinstance(user_model, str) and user_model.startswith("ocid1.generativeaimodel"):
-        model_ocid = user_model
-        defaults = {}
-    else:
-        if path_model_id and path_model_id.startswith("ocid1.generativeaimodel"):
-            model_ocid = path_model_id
-            defaults = {}
-        elif path_model_id in supported:
-            model_key = path_model_id
-            model_ocid = supported[path_model_id]["id"]
-            defaults = supported[path_model_id].get("params", {}).copy()
-        else:
-            raise ValueError("Modelo ausente ou não suportado: use um dos "
-                             f"{list(supported.keys())} ou forneça um OCID válido.")
-
-    overrides = {}
-    for k in [
-        "temperature", "top_p", "top_k", "max_tokens", "frequency_penalty", "presence_penalty",
-        "reasoning_effort", "verbosity", "max_completion_tokens"
-    ]:
-        if k in body and k in body and body[k] is not None:
-            overrides[k] = body[k]
-
-    merged = {**defaults, **overrides}
-    return {"model_key": model_key, "model_ocid": model_ocid, "params": merged}
-
 def to_oci_messages(openai_messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Converte mensagens OpenAI para formato OCI"""
     oci_msgs: List[Dict[str, Any]] = []
     for m in openai_messages:
         role = ROLE_MAP.get(str(m.get("role", "")).lower(), "USER")
@@ -512,10 +380,12 @@ def to_oci_messages(openai_messages: List[Dict[str, Any]]) -> List[Dict[str, Any
             for p in content:
                 if isinstance(p, dict) and p.get("type") == "text":
                     txt = p.get("text", "")
-                    if txt: parts.append({"type": "TEXT", "text": txt})
+                    if txt:
+                        parts.append({"type": "TEXT", "text": txt})
                 elif isinstance(p, dict) and p.get("type") == "image_url":
                     url = p.get("image_url", {})
-                    if isinstance(url, dict): url = url.get("url", "")
+                    if isinstance(url, dict):
+                        url = url.get("url", "")
                     if isinstance(url, str) and url:
                         data_url = ensure_data_url(url)
                         parts.append({"type": "IMAGE_URL", "url": data_url})
@@ -530,21 +400,61 @@ def to_oci_messages(openai_messages: List[Dict[str, Any]]) -> List[Dict[str, Any
     return oci_msgs
 
 def build_oci_chat_payload(messages: List[Dict[str, Any]], params: Dict[str, Any]) -> Dict[str, Any]:
+    """Constrói payload para OCI Chat API"""
     payload = {"messages": messages}
-    if "temperature" in params: payload["temperature"] = params["temperature"]
-    if "top_p" in params: payload["top_p"] = params["top_p"]
-    if "top_k" in params: payload["top_k"] = params["top_k"]
-    if "frequency_penalty" in params: payload["frequency_penalty"] = params["frequency_penalty"]
-    if "presence_penalty" in params: payload["presence_penalty"] = params["presence_penalty"]
+    if "temperature" in params:
+        payload["temperature"] = params["temperature"]
+    if "top_p" in params:
+        payload["top_p"] = params["top_p"]
+    if "top_k" in params:
+        payload["top_k"] = params["top_k"]
+    if "frequency_penalty" in params:
+        payload["frequency_penalty"] = params["frequency_penalty"]
+    if "presence_penalty" in params:
+        payload["presence_penalty"] = params["presence_penalty"]
     if "max_completion_tokens" in params:
         payload["max_completion_tokens"] = params["max_completion_tokens"]
     elif "max_tokens" in params:
         payload["max_completion_tokens"] = params["max_tokens"]
-    if "reasoning_effort" in params: payload["reasoning_effort"] = params["reasoning_effort"]
-    if "verbosity" in params: payload["verbosity"] = params["verbosity"]
+    if "reasoning_effort" in params:
+        payload["reasoning_effort"] = params["reasoning_effort"]
+    if "verbosity" in params:
+        payload["verbosity"] = params["verbosity"]
     return payload
 
-def oci_chat_invoke(region: str, compartment_id: str, model_ocid: str, oci_payload: Dict[str, Any]) -> Dict[str, Any]:
+def extract_token_usage(oci_response: Any) -> Dict[str, Optional[int]]:
+    """Extrai informações de uso de tokens da resposta OCI"""
+    usage = {"prompt_tokens": None, "completion_tokens": None, "total_tokens": None}
+    
+    if not oci_response:
+        return usage
+    
+    try:
+        # Tenta extrair do objeto data.chat_response
+        if hasattr(oci_response, 'data'):
+            data = oci_response.data
+            if hasattr(data, 'chat_response') and data.chat_response:
+                chat_resp = data.chat_response
+                # Verifica se há informações de uso
+                if hasattr(chat_resp, 'usage') and chat_resp.usage:
+                    usage_obj = chat_resp.usage
+                    if hasattr(usage_obj, 'prompt_tokens'):
+                        usage["prompt_tokens"] = usage_obj.prompt_tokens
+                    if hasattr(usage_obj, 'completion_tokens'):
+                        usage["completion_tokens"] = usage_obj.completion_tokens
+                    if hasattr(usage_obj, 'total_tokens'):
+                        usage["total_tokens"] = usage_obj.total_tokens
+                    
+                    # Se total_tokens não estiver disponível, calcula
+                    if usage["total_tokens"] is None and usage["prompt_tokens"] and usage["completion_tokens"]:
+                        usage["total_tokens"] = usage["prompt_tokens"] + usage["completion_tokens"]
+    except Exception as e:
+        print(f"[warn] Erro ao extrair token usage: {e}")
+    
+    return usage
+
+def oci_chat_invoke(model_region: str, compartment_id: str, model_ocid: str, oci_payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Invoca modelo OCI GenAI e retorna resposta com token usage"""
     print(">>> OCI CHAT REQUEST (payload que será enviado):")
     print(json.dumps(oci_payload, ensure_ascii=False, indent=2))
 
@@ -553,11 +463,12 @@ def oci_chat_invoke(region: str, compartment_id: str, model_ocid: str, oci_paylo
             "dry_run": True,
             "note": "TEST_MODE=True — retorno simulado.",
             "payload": oci_payload,
-            "output_text": "[dry-run] ambiente de teste — valide o payload impresso no console."
+            "output_text": "[dry-run] ambiente de teste — valide o payload impresso no console.",
+            "usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30}
         }
 
     try:
-        endpoint = f"https://inference.generativeai.{region}.oci.oraclecloud.com"
+        endpoint = f"https://inference.generativeai.{model_region}.oci.oraclecloud.com"
         client = oci.generative_ai_inference.GenerativeAiInferenceClient(
             config=config, service_endpoint=endpoint, retry_strategy=oci.retry.NoneRetryStrategy(), timeout=(10, 240)
         )
@@ -574,22 +485,32 @@ def oci_chat_invoke(region: str, compartment_id: str, model_ocid: str, oci_paylo
             for c in m["content"]:
                 ctype = c.get("type")
                 if ctype == "TEXT":
-                    tc = oci.generative_ai_inference.models.TextContent(); tc.text = c.get("text", ""); parts.append(tc)
+                    tc = oci.generative_ai_inference.models.TextContent()
+                    tc.text = c.get("text", "")
+                    parts.append(tc)
                 elif ctype == "IMAGE_URL":
                     ic = oci.generative_ai_inference.models.ImageContent()
-                    iu = oci.generative_ai_inference.models.ImageUrl(); iu.url = c.get("url", "")
-                    ic.image_url = iu; parts.append(ic)
+                    iu = oci.generative_ai_inference.models.ImageUrl()
+                    iu.url = c.get("url", "")
+                    ic.image_url = iu
+                    parts.append(ic)
             sdk_msg.content = parts
             sdk_messages.append(sdk_msg)
 
         generic.messages = sdk_messages
 
-        if "temperature" in oci_payload: generic.temperature = oci_payload["temperature"]
-        if "top_p" in oci_payload: generic.top_p = oci_payload["top_p"]
-        if "top_k" in oci_payload: generic.top_k = oci_payload["top_k"]
-        if "frequency_penalty" in oci_payload: generic.frequency_penalty = oci_payload["frequency_penalty"]
-        if "presence_penalty" in oci_payload: generic.presence_penalty = oci_payload["presence_penalty"]
-        if "max_completion_tokens" in oci_payload: generic.max_tokens = oci_payload["max_completion_tokens"]
+        if "temperature" in oci_payload:
+            generic.temperature = oci_payload["temperature"]
+        if "top_p" in oci_payload:
+            generic.top_p = oci_payload["top_p"]
+        if "top_k" in oci_payload:
+            generic.top_k = oci_payload["top_k"]
+        if "frequency_penalty" in oci_payload:
+            generic.frequency_penalty = oci_payload["frequency_penalty"]
+        if "presence_penalty" in oci_payload:
+            generic.presence_penalty = oci_payload["presence_penalty"]
+        if "max_completion_tokens" in oci_payload:
+            generic.max_tokens = oci_payload["max_completion_tokens"]
 
         chat_detail.serving_mode = oci.generative_ai_inference.models.OnDemandServingMode(model_id=model_ocid)
         chat_detail.chat_request = generic
@@ -598,84 +519,125 @@ def oci_chat_invoke(region: str, compartment_id: str, model_ocid: str, oci_paylo
         chat_response = client.chat(chat_detail)
         data = chat_response.data
 
+        output_text = None
         if hasattr(data, "chat_response") and data.chat_response and data.chat_response.choices:
             choice = data.chat_response.choices[0]
-            text = None
             if choice.message and choice.message.content:
                 for block in choice.message.content:
                     if hasattr(block, "text") and block.text:
-                        text = block.text; break
-            return {"output_text": text, "raw": "sdk"}
-        return {"output_text": None, "raw": "unknown"}
-    except Exception as e:
-        return {"error": f"Falha ao chamar OCI: {e}"}
+                        output_text = block.text
+                        break
 
-def to_openai_chat_response(model_label: str, content_text: str, finish_reason: str = "stop") -> Dict[str, Any]:
-    now = int(time.time()); rid = f"chatcmpl-{uuid.uuid4().hex[:24]}"
+        # Extrai informações de token usage
+        usage = extract_token_usage(chat_response)
+
+        return {"output_text": output_text, "usage": usage, "raw": "sdk"}
+    except Exception as e:
+        return {"error": f"Falha ao chamar OCI: {e}", "usage": {"prompt_tokens": None, "completion_tokens": None, "total_tokens": None}}
+
+def to_openai_chat_response(model_label: str, content_text: str, usage: Dict[str, Optional[int]] = None, finish_reason: str = "stop") -> Dict[str, Any]:
+    """Formata resposta no padrão OpenAI Chat Completion"""
+    now = int(time.time())
+    rid = f"chatcmpl-{uuid.uuid4().hex[:24]}"
+    
+    if usage is None:
+        usage = {"prompt_tokens": None, "completion_tokens": None, "total_tokens": None}
+    
     return {
-        "id": rid, "object": "chat.completion", "created": now, "model": model_label,
-        "choices": [{"index": 0, "message": {"role": "assistant", "content": content_text}, "finish_reason": finish_reason}],
-        "usage": {"prompt_tokens": None, "completion_tokens": None, "total_tokens": None}
+        "id": rid,
+        "object": "chat.completion",
+        "created": now,
+        "model": model_label,
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": content_text},
+            "finish_reason": finish_reason
+        }],
+        "usage": usage
     }
 
-def to_openai_text_response(model_label: str, content_text: str, finish_reason: str = "stop") -> Dict[str, Any]:
-    now = int(time.time()); rid = f"cmpl-{uuid.uuid4().hex[:24]}"
+def to_openai_text_response(model_label: str, content_text: str, usage: Dict[str, Optional[int]] = None, finish_reason: str = "stop") -> Dict[str, Any]:
+    """Formata resposta no padrão OpenAI Text Completion"""
+    now = int(time.time())
+    rid = f"cmpl-{uuid.uuid4().hex[:24]}"
+    
+    if usage is None:
+        usage = {"prompt_tokens": None, "completion_tokens": None, "total_tokens": None}
+    
     return {
-        "id": rid, "object": "text_completion", "created": now, "model": model_label,
-        "choices": [{"index": 0, "text": content_text, "finish_reason": finish_reason, "logprobs": None}],
-        "usage": {"prompt_tokens": None, "completion_tokens": None, "total_tokens": None}
+        "id": rid,
+        "object": "text_completion",
+        "created": now,
+        "model": model_label,
+        "choices": [{
+            "index": 0,
+            "text": content_text,
+            "finish_reason": finish_reason,
+            "logprobs": None
+        }],
+        "usage": usage
     }
 
 def sse_chat_stream(model_label: str, full_text: str) -> Generator[str, None, None]:
-    rid = f"chatcmpl-{uuid.uuid4().hex[:24]}"; now = int(time.time())
-    first = {"id": rid, "object": "chat.completion.chunk", "created": now, "model": model_label,
-             "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}]}
+    """Gera stream SSE para chat completion"""
+    rid = f"chatcmpl-{uuid.uuid4().hex[:24]}"
+    now = int(time.time())
+    first = {
+        "id": rid,
+        "object": "chat.completion.chunk",
+        "created": now,
+        "model": model_label,
+        "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}]
+    }
     yield f"data: {json.dumps(first)}\n\n"
+    
     for ch in full_text or "":
-        chunk = {"id": rid, "object": "chat.completion.chunk", "created": now, "model": model_label,
-                 "choices": [{"index": 0, "delta": {"content": ch}, "finish_reason": None}]}
+        chunk = {
+            "id": rid,
+            "object": "chat.completion.chunk",
+            "created": now,
+            "model": model_label,
+            "choices": [{"index": 0, "delta": {"content": ch}, "finish_reason": None}]
+        }
         yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
-    endchunk = {"id": rid, "object": "chat.completion.chunk", "created": now, "model": model_label,
-                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}
+    
+    endchunk = {
+        "id": rid,
+        "object": "chat.completion.chunk",
+        "created": now,
+        "model": model_label,
+        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
+    }
     yield f"data: {json.dumps(endchunk)}\n\n"
     yield "data: [DONE]\n\n"
 
-# ===== Helpers OpenAI-v1 p/ Agents (sem session_id em URL) =====
-
-def _messages_to_text(messages: List[Dict[str, Any]]) -> str:
-    """
-    Concatena conteúdo textual de mensagens OpenAI-like para enviar a um GenAI Agent.
-    Ignora imagens/partes não-textuais. Mantém a ordem.
-    """
-    if not isinstance(messages, list):
-        return ""
-    chunks = []
-    for m in messages:
-        content = m.get("content", "")
-        if isinstance(content, str):
-            chunks.append(content)
-        elif isinstance(content, list):
-            for p in content:
-                if isinstance(p, dict) and p.get("type") == "text":
-                    t = p.get("text", "")
-                    if t:
-                        chunks.append(t)
-                elif isinstance(p, str):
-                    chunks.append(p)
-        elif content:
-            try:
-                chunks.append(json.dumps(content, ensure_ascii=False))
-            except Exception:
-                pass
-    return "\n".join(chunks).strip()
+# ==========================
+# Helpers para extração de texto de Agents
+# ==========================
 
 def _coerce_to_text(val: Any) -> str:
+    """Converte valor para texto, tentando extrair de estruturas aninhadas"""
     if val is None:
         return ""
     if isinstance(val, str):
         return val
+    
+    # Se for lista, tenta extrair texto do primeiro elemento
+    if isinstance(val, list):
+        for item in val:
+            if isinstance(item, dict) and isinstance(item.get("text"), str):
+                return item["text"]
+            elif isinstance(item, str):
+                return item
+        # Se não encontrou texto, tenta recursivamente
+        for item in val:
+            txt = _coerce_to_text(item)
+            if txt and not txt.startswith('{'):
+                return txt
+    
     try:
         if isinstance(val, dict):
+            # Tenta extrair de campos comuns
             if isinstance(val.get("text"), str):
                 return val["text"]
             if isinstance(val.get("content"), str):
@@ -686,6 +648,7 @@ def _coerce_to_text(val: Any) -> str:
                 for c in val["content"]:
                     if isinstance(c, dict) and isinstance(c.get("text"), str):
                         return c["text"]
+            # Tenta extrair de data
             data = val.get("data")
             if isinstance(data, dict):
                 for key in ("message", "output", "text"):
@@ -716,6 +679,7 @@ def _extract_agent_text(agent_payload: Any) -> str:
             return agent_payload
 
     if isinstance(agent_payload, dict):
+        # Tenta extrair de campos candidatos na ordem de prioridade
         candidates = [
             agent_payload.get("message"),
             agent_payload.get("output"),
@@ -733,276 +697,324 @@ def _extract_agent_text(agent_payload: Any) -> str:
 
     return _coerce_to_text(agent_payload)
 
-def _resolve_agent_session(region: str, agent_endpoint_id: str) -> Dict[str, Any]:
-    """
-    SEM session_id na URL. Cria/renova sessão automaticamente com base em:
-      - X-Channel (opcional, default "openai-v1")
-      - X-Cuid (opcional). Se ausente, deriva a partir do header de auth ou gera determinístico.
-    """
-    channel = request.headers.get("X-Channel") or "openai-v1"
-    cuid = request.headers.get("X-Cuid")
-    if not cuid:
-        seed = request.headers.get("Authorization") or request.headers.get("X-API-Key") or uuid.uuid4().hex
-        cuid = uuid.uuid5(uuid.NAMESPACE_OID, seed).hex
-    return session_controller(region, agent_endpoint_id, channel, cuid)
-
-def _agent_openai_like_answer(model_label: str, agent_payload: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Mapeia a resposta do Agent para o formato OpenAI chat.completion.
-    Garante que 'choices[0].message.content' seja SEMPRE string.
-    """
-    text = _extract_agent_text(agent_payload)
-    return to_openai_chat_response(model_label, text)
-
 # ==========================
-# Endpoints nativos 
+# Endpoints OpenAI v1 — NOVA ESTRUTURA /genai/{modelname}/v1/...
 # ==========================
 
 @app.route("/", methods=["GET"])
 def test():
-    return jsonify({"test": "ok"})
+    return jsonify({"test": "ok", "version": "2.0-refactored"})
 
-@app.route("/test/<myvar>/copy", methods=["GET"])
-def var_copy(myvar):
-    return jsonify({"myvar": myvar})
+@app.route("/genai/<model_name>/v1/models", methods=["GET"])
+def v1_models(model_name):
+    """
+    Retorna informações do modelo específico (não mais lista completa).
+    Compatível com OpenAI /v1/models/{model_id}
+    """
+    try:
+        model_config = get_model_config(model_name)
+        return jsonify({
+            "id": model_name,
+            "object": "model",
+            "created": int(time.time()),
+            "owned_by": "oci.genai",
+            "permission": [],
+            "root": model_name,
+            "parent": None,
+            "ocid": model_config.get("id"),
+            "compartmentId": model_config.get("compartmentId"),
+            "region": model_config.get("region"),
+            "type": model_config.get("type", "model"),
+            "params": model_config.get("params", {})
+        })
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 404
 
-@app.route("/genai-agent/<region>/<agent_endpoint_id>/session", methods=["POST"])
-def manage_session(region, agent_endpoint_id):
-    data = request.get_json() or {}
-    print(">>> /genai-agent/.../session payload recebido:")
-    channel = data.get("channel"); cuid = data.get("cuid")
-    if not all([channel, cuid]):
-        return jsonify({"error": "Parâmetros 'channel' e 'cuid' são obrigatórios"}), 400
-    response_data = session_controller(region, agent_endpoint_id, channel, cuid)
-    return jsonify(response_data)
-
-@app.route("/genai-agent/<region>/<agent_endpoint_id>/<session_id>/chat", methods=["POST"])
-def agent_chat(region, agent_endpoint_id, session_id):
-    data = request.get_json() or {}
-    print(">>> /genai-agent/.../chat payload recebido:")
-    user_message = data.get("userMessage")
-    if not user_message:
-        return jsonify({"error": "userMessage é obrigatório"}), 400
-    response_data = ask_agent(region, agent_endpoint_id, session_id, user_message)
-    return jsonify({"agentResponse": response_data})
-
-@app.route("/genai/<region>/<compartment_id>/<model_id>/inference", methods=["POST"])
-def inference(region, compartment_id, model_id):
-    data = request.get_json() or {}
-    print(">>> /inference request body:")
-    prompt = data.get("prompt")
-    if not prompt:
-        return jsonify({"error": "Campo 'prompt' é obrigatório."}), 400
-    response_data = call_inference_model(region, compartment_id, model_id, prompt)
-    return jsonify(response_data)
-
-# ==========================
-# Endpoints OpenAI v1 compat — CHAT (LLMs)
-# ==========================
-
-@app.route("/genai/<region>/<compartment_id>/<path_model_id>/v1/chat/completions", methods=["POST"])
-def v1_chat_completions(region, compartment_id, path_model_id):
+@app.route("/genai/<model_name>/v1/chat/completions", methods=["POST"])
+def v1_chat_completions(model_name):
+    """
+    Chat completion com nova estrutura de URL.
+    Suporta tanto models quanto agents baseado no atributo 'type' do JSON.
+    """
     try:
         body = request.get_json(force=True, silent=False) or {}
     except Exception as e:
         return jsonify({"error": f"JSON inválido: {e}"}), 400
 
-    print(">>> /v1/chat/completions body recebido:")
-    print(body)
+    print(f">>> /genai/{model_name}/v1/chat/completions body recebido:")
+    print(json.dumps(body, ensure_ascii=False, indent=2))
 
     try:
-        resolved = resolve_model_and_params(body, path_model_id)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 400
+        model_config = get_model_config(model_name)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 404
 
-    model_label = body.get("model") or resolved["model_key"] or resolved["model_ocid"]
+    model_type = model_config.get("type", "model")
+    model_region = model_config.get("region")
+    compartment_id = model_config.get("compartmentId")
+    model_ocid = model_config.get("id")
+
+    # Se for agent, delega para função específica
+    if model_type == "agent":
+        return _handle_agent_chat(model_name, model_config, body)
+
+    # Caso contrário, trata como model
     msgs = body.get("messages") or []
     if not isinstance(msgs, list) or not msgs:
         return jsonify({"error": "Campo 'messages' é obrigatório e deve ser uma lista."}), 400
 
+    # Mescla parâmetros do JSON com overrides do body
+    params = model_config.get("params", {}).copy()
+    for k in ["temperature", "top_p", "top_k", "max_tokens", "frequency_penalty", 
+              "presence_penalty", "reasoning_effort", "verbosity", "max_completion_tokens"]:
+        if k in body and body[k] is not None:
+            params[k] = body[k]
+
     oci_msgs = to_oci_messages(msgs)
-    oci_payload = build_oci_chat_payload(oci_msgs, resolved["params"])
-    oci_result = oci_chat_invoke(region, compartment_id, resolved["model_ocid"], oci_payload)
+    oci_payload = build_oci_chat_payload(oci_msgs, params)
+    oci_result = oci_chat_invoke(model_region, compartment_id, model_ocid, oci_payload)
 
     if isinstance(oci_result, dict):
-        output_text = (
-            oci_result.get("output_text")
-            or oci_result.get("generated_text")
-            or oci_result.get("inference_response", {}).get("output_text")
-            or oci_result.get("payload", {}).get("output_text")
-        )
+        output_text = oci_result.get("output_text")
+        usage = oci_result.get("usage", {})
     else:
         output_text = None
+        usage = {}
 
     if output_text is None:
         output_text = json.dumps(oci_result, ensure_ascii=False)
 
     if body.get("stream") is True:
-        return Response(stream_with_context(sse_chat_stream(model_label, output_text)),
-                        mimetype="text/event-stream")
+        return Response(
+            stream_with_context(sse_chat_stream(model_name, output_text)),
+            mimetype="text/event-stream"
+        )
 
-    return jsonify(to_openai_chat_response(model_label, output_text))
+    return jsonify(to_openai_chat_response(model_name, output_text, usage))
 
-@app.route("/genai/<region>/<compartment_id>/<path_model_id>/v1/completions", methods=["POST"])
-def v1_text_completions(region, compartment_id, path_model_id):
+def _handle_agent_chat(model_name: str, model_config: Dict[str, Any], body: Dict[str, Any]) -> Response:
+    """Handler específico para agents"""
+    model_region = model_config.get("region")
+    agent_endpoint_id = model_config.get("id")
+    
+    msgs = body.get("messages") or []
+    if not isinstance(msgs, list) or not msgs:
+        return jsonify({"error": "Campo 'messages' é obrigatório e deve ser uma lista."}), 400
+
+    # Extrai texto das mensagens
+    user_text = ""
+    for m in msgs:
+        content = m.get("content", "")
+        if isinstance(content, str):
+            user_text += content + "\n"
+        elif isinstance(content, list):
+            for p in content:
+                if isinstance(p, dict) and p.get("type") == "text":
+                    user_text += p.get("text", "") + "\n"
+
+    user_text = user_text.strip()
+    if not user_text:
+        return jsonify({"error": "Nenhum conteúdo textual encontrado nas mensagens"}), 400
+
+    # Gerencia sessão automaticamente
+    channel = request.headers.get("X-Channel") or "openai-v1"
+    cuid = request.headers.get("X-Cuid")
+    if not cuid:
+        seed = request.headers.get("Authorization") or request.headers.get("X-API-Key") or uuid.uuid4().hex
+        cuid = uuid.uuid5(uuid.NAMESPACE_OID, seed).hex
+
+    sess = session_controller(model_region, agent_endpoint_id, channel, cuid)
+    if "error" in sess:
+        return jsonify({"error": f"Falha ao criar sessão: {sess['error']}"}), 500
+
+    session_id = sess["id"]
+    
+    # Chama agente
+    agent_resp = ask_agent(model_region, agent_endpoint_id, session_id, user_text)
+    
+    # Verifica erros HTTP
+    if isinstance(agent_resp, dict) and "_http_status" in agent_resp:
+        status = agent_resp["_http_status"]
+        if status == 409:
+            # Sessão inválida, invalida e tenta novamente
+            _invalidate_session(sess.get("sessionKey", ""))
+            sess = session_controller(model_region, agent_endpoint_id, channel, cuid)
+            if "error" not in sess:
+                session_id = sess["id"]
+                agent_resp = ask_agent(model_region, agent_endpoint_id, session_id, user_text)
+
+    # Extrai texto da resposta usando função auxiliar
+    response_text = _extract_agent_text(agent_resp)
+
+    # Streaming
+    if body.get("stream") is True:
+        return Response(
+            stream_with_context(sse_chat_stream(model_name, response_text)),
+            mimetype="text/event-stream"
+        )
+
+    # Resposta normal (agents não retornam token usage real, então usamos None)
+    usage = {"prompt_tokens": None, "completion_tokens": None, "total_tokens": None}
+    resp = to_openai_chat_response(model_name, response_text, usage)
+    resp["_agent"] = {"session_id": session_id, "reused": sess.get("reused", False)}
+    return jsonify(resp)
+
+def _handle_agent_completion(model_name: str, model_config: Dict[str, Any], body: Dict[str, Any]) -> Response:
+    """Handler específico para agents em /v1/completions"""
+    model_region = model_config.get("region")
+    agent_endpoint_id = model_config.get("id")
+    
+    prompt = body.get("prompt")
+    if prompt is None:
+        return jsonify({"error": "Campo 'prompt' é obrigatório."}), 400
+    
+    # Converte prompt para texto
+    prompt_text = "\n".join([str(p) for p in prompt]) if isinstance(prompt, list) else str(prompt)
+    
+    if not prompt_text.strip():
+        return jsonify({"error": "Prompt não pode estar vazio"}), 400
+    
+    # Gerencia sessão automaticamente (com fallback se não houver suporte)
+    channel = request.headers.get("X-Channel") or "openai-v1-completion"
+    cuid = request.headers.get("X-Cuid")
+    if not cuid:
+        seed = request.headers.get("Authorization") or request.headers.get("X-API-Key") or uuid.uuid4().hex
+        cuid = uuid.uuid5(uuid.NAMESPACE_OID, seed).hex
+    
+    # Tenta criar/obter sessão
+    sess = session_controller(model_region, agent_endpoint_id, channel, cuid)
+    session_id = None
+    session_error = False
+    
+    if "error" in sess:
+        # Se falhar ao criar sessão, tenta continuar sem sessão (alguns agents não precisam)
+        print(f"[warn] Falha ao criar sessão para agent: {sess['error']}")
+        session_error = True
+    else:
+        session_id = sess["id"]
+    
+    # Chama agente (com ou sem session_id)
+    if session_id:
+        agent_resp = ask_agent(model_region, agent_endpoint_id, session_id, prompt_text)
+        
+        # Verifica erros HTTP e tenta recuperar
+        if isinstance(agent_resp, dict) and "_http_status" in agent_resp:
+            status = agent_resp["_http_status"]
+            if status == 409:
+                # Sessão inválida, invalida e tenta novamente
+                _invalidate_session(sess.get("sessionKey", ""))
+                sess = session_controller(model_region, agent_endpoint_id, channel, cuid)
+                if "error" not in sess:
+                    session_id = sess["id"]
+                    agent_resp = ask_agent(model_region, agent_endpoint_id, session_id, prompt_text)
+                else:
+                    # Se ainda falhar, retorna erro
+                    return jsonify({"error": f"Falha ao recuperar sessão: {sess['error']}"}), 500
+            elif status >= 400:
+                # Outros erros HTTP
+                error_msg = agent_resp.get("_raw_text") or agent_resp.get("error") or f"HTTP {status}"
+                return jsonify({"error": f"Agent retornou erro: {error_msg}"}), 502
+    else:
+        # Sem sessão - retorna erro informativo
+        return jsonify({
+            "error": "Agent requer sessão mas falhou ao criar. Use /v1/chat/completions ou configure sessão manualmente."
+        }), 500
+    
+    # Extrai texto da resposta usando função auxiliar
+    response_text = _extract_agent_text(agent_resp)
+    
+    # Streaming
+    if body.get("stream") is True:
+        return Response(
+            stream_with_context(sse_chat_stream(model_name, response_text)),
+            mimetype="text/event-stream"
+        )
+    
+    # Resposta normal (agents não retornam token usage real)
+    usage = {"prompt_tokens": None, "completion_tokens": None, "total_tokens": None}
+    resp = to_openai_text_response(model_name, response_text, usage)
+    if session_id:
+        resp["_agent"] = {"session_id": session_id, "reused": sess.get("reused", False)}
+    return jsonify(resp)
+
+@app.route("/genai/<model_name>/v1/completions", methods=["POST"])
+def v1_text_completions(model_name):
+    """Text completion (legado OpenAI)"""
     try:
         body = request.get_json(force=True, silent=False) or {}
     except Exception as e:
         return jsonify({"error": f"JSON inválido: {e}"}), 400
 
-    print(">>> /v1/completions body recebido:")
-    print(body)
+    print(f">>> /genai/{model_name}/v1/completions body recebido:")
+    print(json.dumps(body, ensure_ascii=False, indent=2))
 
     try:
-        resolved = resolve_model_and_params(body, path_model_id)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 400
+        model_config = get_model_config(model_name)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 404
 
-    model_label = body.get("model") or resolved["model_key"] or resolved["model_ocid"]
+    model_type = model_config.get("type", "model")
+    
+    # Se for agent, delega para função específica
+    if model_type == "agent":
+        return _handle_agent_completion(model_name, model_config, body)
+
+    model_region = model_config.get("region")
+    compartment_id = model_config.get("compartmentId")
+    model_ocid = model_config.get("id")
+
     prompt = body.get("prompt")
     if prompt is None:
         return jsonify({"error": "Campo 'prompt' é obrigatório."}), 400
 
     prompt_text = "\n".join([str(p) for p in prompt]) if isinstance(prompt, list) else str(prompt)
     msgs = [{"role": "user", "content": prompt_text}]
+
+    # Mescla parâmetros
+    params = model_config.get("params", {}).copy()
+    for k in ["temperature", "top_p", "top_k", "max_tokens", "frequency_penalty", 
+              "presence_penalty", "max_completion_tokens"]:
+        if k in body and body[k] is not None:
+            params[k] = body[k]
+
     oci_msgs = to_oci_messages(msgs)
-    oci_payload = build_oci_chat_payload(oci_msgs, resolved["params"])
-    oci_result = oci_chat_invoke(region, compartment_id, resolved["model_ocid"], oci_payload)
+    oci_payload = build_oci_chat_payload(oci_msgs, params)
+    oci_result = oci_chat_invoke(model_region, compartment_id, model_ocid, oci_payload)
 
     if isinstance(oci_result, dict):
-        output_text = (
-            oci_result.get("output_text")
-            or oci_result.get("generated_text")
-            or oci_result.get("inference_response", {}).get("output_text")
-            or oci_result.get("payload", {}).get("output_text")
-        )
+        output_text = oci_result.get("output_text")
+        usage = oci_result.get("usage", {})
     else:
         output_text = None
+        usage = {}
 
     if output_text is None:
         output_text = json.dumps(oci_result, ensure_ascii=False)
 
     if body.get("stream") is True:
-        return Response(stream_with_context(sse_chat_stream(model_label, output_text)),
-                        mimetype="text/event-stream")
+        return Response(
+            stream_with_context(sse_chat_stream(model_name, output_text)),
+            mimetype="text/event-stream"
+        )
 
-    return jsonify(to_openai_text_response(model_label, output_text))
-
-# ==========================
-# OpenAI v1 compatibility — GenAI Agents (auto-sessão com retry 409)
-# ==========================
-
-@app.route("/genai-agent/<region>/<agent_endpoint_id>/v1/chat/completions", methods=["POST"])
-def agent_v1_chat_completions_auto(region, agent_endpoint_id):
-    """
-    OpenAI v1 compat (SEM session_id na URL): cria/renova uma sessão automaticamente.
-    Faz retry 1x em caso de 409 (sessão inválida/expirada).
-    """
-    try:
-        body = request.get_json(force=True, silent=False) or {}
-    except Exception as e:
-        return jsonify({"error": f"JSON inválido: {e}"}), 400
-
-    messages = body.get("messages")
-    if not messages or not isinstance(messages, list):
-        return jsonify({"error": "Campo 'messages' é obrigatório e deve ser uma lista."}), 400
-
-    # cria/renova sessão automaticamente (primeira tentativa)
-    sess = _resolve_agent_session(region, agent_endpoint_id)
-    if "error" in sess:
-        return jsonify({"error": f"Falha ao criar sessão: {sess['error']}"}), 500
-    session_id = sess.get("id")
-    session_key = sess.get("sessionKey") or ""
-
-    # extrai texto das mensagens OpenAI-like
-    user_message = _messages_to_text(messages)
-    if not user_message:
-        return jsonify({"error": "Não foi possível extrair texto de 'messages'."}), 400
-
-    # 1ª chamada ao Agent
-    agent_resp = ask_agent(region, agent_endpoint_id, session_id, user_message)
-
-    # Se veio erro 409, invalida e tenta 1x recriar sessão
-    if isinstance(agent_resp, dict) and agent_resp.get("_http_status") == 409:
-        print(f"[agent] 409 recebido. Invalidando sessão {session_key} e recriando...")
-        _invalidate_session(session_key)
-        sess2 = _resolve_agent_session(region, agent_endpoint_id)
-        if "error" in sess2:
-            return jsonify({
-                "error": {
-                    "message": f"Agent chat 409 e falha ao recriar sessão: {sess2['error']}",
-                    "type": "agent_session_error",
-                    "code": 409
-                }
-            }), 502
-        session_id = sess2.get("id")
-        agent_resp = ask_agent(region, agent_endpoint_id, session_id, user_message)
-
-    # Se ainda for erro HTTP (qualquer status), retornar erro amigável
-    if isinstance(agent_resp, dict) and agent_resp.get("_http_status"):
-        status = agent_resp.get("_http_status")
-        raw_json = agent_resp.get("_raw_json")
-        raw_text = agent_resp.get("_raw_text")
-        msg = None
-        if isinstance(raw_json, dict):
-            msg = raw_json.get("message") or raw_json.get("error") or raw_json.get("title")
-            if not msg:
-                msg = json.dumps(raw_json, ensure_ascii=False)
-        if not msg:
-            msg = raw_text or f"HTTP {status} do Agent."
-        return jsonify({
-            "error": {
-                "message": msg,
-                "type": "agent_http_error",
-                "code": status
-            }
-        }), 502
-
-    model_label = body.get("model") or f"agent:{agent_endpoint_id}"
-
-    # streaming
-    if body.get("stream") is True:
-        stream_text = _extract_agent_text(agent_resp)
-        return Response(stream_with_context(sse_chat_stream(model_label, stream_text)),
-                        mimetype="text/event-stream")
-
-    # normal
-    resp = _agent_openai_like_answer(model_label, agent_resp)
-    resp["_agent"] = {"session_id": session_id, "reused": sess.get("reused", False)}
-    return jsonify(resp)
-
-@app.route("/genai-agent/<region>/<agent_endpoint_id>/v1/models", methods=["GET"])
-def agent_v1_models(region, agent_endpoint_id):
-    """
-    Retorna a lista de modelos suportados para compatibilidade OpenAI/v1 (agents).
-    Estrutura idêntica à rota /genai/.../v1/models.
-    """
-    supported = get_supported_models()  # HOT-RELOAD do JSON externo
-    data = []
-    for k, v in supported.items():
-        data.append({
-            "id": k,
-            "object": "model",
-            "owned_by": "oci.genai.agent",
-            "ocid": v.get("id"),
-            "params": v.get("params", {}),
-            "region": region,
-            "agent_endpoint": agent_endpoint_id
-        })
-    return jsonify({"object": "list", "data": data})
+    return jsonify(to_openai_text_response(model_name, output_text, usage))
 
 # ==========================
 # Endpoints OpenAI v1 — FILES
 # ==========================
 
-def _files_upload_handler():
+@app.route("/genai/<model_name>/v1/files", methods=["POST"])
+def v1_files_upload(model_name):
+    """Upload de arquivo"""
     if "file" not in request.files:
         return jsonify({"error": "Campo 'file' é obrigatório"}), 400
     f = request.files["file"]
     result = upload_file_to_bucket(f, f.filename)
     return jsonify(result)
 
-def _files_list_handler():
+@app.route("/genai/<model_name>/v1/files", methods=["GET"])
+def v1_files_list(model_name):
+    """Lista arquivos"""
     if TEST_MODE:
         return jsonify({"data": [
             {"id": fid, "object": "file", "filename": os.path.basename(obj), "bytes": 0}
@@ -1019,16 +1031,9 @@ def _files_list_handler():
         })
     return jsonify({"data": files})
 
-@app.route("/genai/<region>/<compartment_id>/<path_model_id>/v1/files", methods=["POST"])
-def v1_files_upload(region=None, compartment_id=None, path_model_id=None):
-    return _files_upload_handler()
-
-@app.route("/genai/<region>/<compartment_id>/<path_model_id>/v1/files", methods=["GET"])
-def v1_files_list(region=None, compartment_id=None, path_model_id=None):
-    return _files_list_handler()
-
-@app.route("/genai/<region>/<compartment_id>/<path_model_id>/v1/files/<file_id>/content", methods=["GET"])
-def v1_files_content(file_id, region=None, compartment_id=None, path_model_id=None):
+@app.route("/genai/<model_name>/v1/files/<file_id>/content", methods=["GET"])
+def v1_files_content(model_name, file_id):
+    """Download de arquivo"""
     if TEST_MODE:
         return jsonify({"note": "TEST_MODE — conteúdo não disponível"}), 200
     obj = FILE_INDEX.get(file_id)
@@ -1045,73 +1050,317 @@ def v1_files_content(file_id, region=None, compartment_id=None, path_model_id=No
     )
 
 # ==========================
-# Endpoints OpenAI v1 — IMAGES (gera/edita/varia) com retorno via PAR
+# Endpoints OpenAI v1 — IMAGES (mock)
 # ==========================
 
-def _store_image_bytes_and_return_url(image_bytes: bytes, filename: str) -> str:
+def _store_image_bytes_and_return_url(image_bytes: bytes, filename: str, model_region: str = None) -> str:
+    """Armazena imagem e retorna URL com PAR"""
+    target_region = model_region or region
     if TEST_MODE:
-        return f"https://objectstorage.{region}.oraclecloud.com/test/{UPLOAD_PREFIX}{uuid.uuid4().hex}_{filename}"
+        return f"https://objectstorage.{target_region}.oraclecloud.com/test/{UPLOAD_PREFIX}{uuid.uuid4().hex}_{filename}"
     object_name = f"{UPLOAD_PREFIX}{uuid.uuid4().hex}_{filename}"
     object_client.put_object(
         namespace, BUCKET_NAME, object_name, image_bytes, content_type=guess_mime(filename, "image/png")
     )
-    return create_par_for_object(object_name, hours_valid=24)
+    return create_par_for_object(object_name, hours_valid=24, model_region=target_region)
 
-@app.route("/genai/<region>/<compartment_id>/<path_model_id>/v1/images/generations", methods=["POST"])
-def v1_images_generations(region=None, compartment_id=None, path_model_id=None):
+@app.route("/genai/<model_name>/v1/images/generations", methods=["POST"])
+def v1_images_generations(model_name):
+    """Geração de imagens (mock)"""
     body = request.form or request.get_json(force=True, silent=True) or {}
     prompt = body.get("prompt")
     if not prompt:
         return jsonify({"error": "Campo 'prompt' é obrigatório"}), 400
+    
+    try:
+        model_config = get_model_config(model_name)
+        model_region = model_config.get("region")
+    except ValueError:
+        model_region = None
+    
+    # Mock: pixel transparente
     png_bytes = base64.b64decode(
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHuwKp9w8H2AAAAABJRU5ErkJggg=="
     )
-    url = _store_image_bytes_and_return_url(png_bytes, "generation.png")
+    url = _store_image_bytes_and_return_url(png_bytes, "generation.png", model_region)
     return jsonify({"created": int(time.time()), "data": [{"url": url}]})
 
-@app.route("/genai/<region>/<compartment_id>/<path_model_id>/v1/images/edits", methods=["POST"])
-def v1_images_edits(region=None, compartment_id=None, path_model_id=None):
+@app.route("/genai/<model_name>/v1/images/edits", methods=["POST"])
+def v1_images_edits(model_name):
+    """Edição de imagens (mock)"""
     if "image" not in request.files:
         return jsonify({"error": "Campo 'image' (multipart) é obrigatório"}), 400
-    _ = request.form.get("prompt", "")
+    
+    try:
+        model_config = get_model_config(model_name)
+        model_region = model_config.get("region")
+    except ValueError:
+        model_region = None
+    
     base_img = request.files["image"].read()
-    url = _store_image_bytes_and_return_url(base_img, "edit.png")
+    url = _store_image_bytes_and_return_url(base_img, "edit.png", model_region)
     return jsonify({"created": int(time.time()), "data": [{"url": url, "note": "mock edit"}]})
 
-@app.route("/genai/<region>/<compartment_id>/<path_model_id>/v1/images/variations", methods=["POST"])
-def v1_images_variations(region=None, compartment_id=None, path_model_id=None):
+@app.route("/genai/<model_name>/v1/images/variations", methods=["POST"])
+def v1_images_variations(model_name):
+    """Variações de imagens (mock)"""
     if "image" not in request.files:
         return jsonify({"error": "Campo 'image' (multipart) é obrigatório"}), 400
+    
+    try:
+        model_config = get_model_config(model_name)
+        model_region = model_config.get("region")
+    except ValueError:
+        model_region = None
+    
     base_img = request.files["image"].read()
-    url = _store_image_bytes_and_return_url(base_img, "variation.png")
+    url = _store_image_bytes_and_return_url(base_img, "variation.png", model_region)
     return jsonify({"created": int(time.time()), "data": [{"url": url, "note": "mock variation"}]})
 
 # ==========================
-# Endpoint OpenAI v1 /models (LLMs)
+# Endpoints Diretos OCI (sem camada OpenAI/v1)
 # ==========================
 
-@app.route("/genai/<region>/<compartment_id>/<path_model_id>/v1/models", methods=["GET"])
-def v1_models(region, compartment_id, path_model_id):
+@app.route("/genai/<model_name>/session", methods=["POST"])
+def oci_session(model_name):
     """
-    Lista os modelos disponíveis (do JSON hot-reload), em formato OpenAI-like.
-    Ignora path_model_id (mantido apenas para compat. com o padrão de URL existente).
+    Gerenciamento de sessão para agents.
+    Endpoint direto OCI (sem camada OpenAI/v1).
     """
-    supported = get_supported_models()
-    data = []
-    for k, v in supported.items():
-        data.append({
-            "id": k,             # expõe o apelido p/ uso direto em { model: "<apelido>" }
-            "object": "model",
-            "owned_by": "oci.genai",
-            "ocid": v.get("id"),
-            "params": v.get("params", {})
+    try:
+        model_config = get_model_config(model_name)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 404
+    
+    model_type = model_config.get("type", "model")
+    if model_type != "agent":
+        return jsonify({"error": f"Modelo '{model_name}' não é um agent. Use type='agent' no JSON."}), 400
+    
+    data = request.get_json() or {}
+    print(f">>> /genai/{model_name}/session payload recebido:")
+    print(json.dumps(data, ensure_ascii=False, indent=2))
+    
+    channel = data.get("channel")
+    cuid = data.get("cuid")
+    
+    if not all([channel, cuid]):
+        return jsonify({"error": "Parâmetros 'channel' e 'cuid' são obrigatórios"}), 400
+    
+    model_region = model_config.get("region")
+    agent_endpoint_id = model_config.get("id")
+    
+    response_data = session_controller(model_region, agent_endpoint_id, channel, cuid)
+    return jsonify(response_data)
+
+@app.route("/genai/<model_name>/chat", methods=["POST"])
+def oci_chat(model_name):
+    """
+    Chat direto com agent com gerenciamento automático de sessão.
+    
+    Aceita dois modos:
+    1. Com sessionId (modo manual): {"sessionId": "...", "userMessage": "..."}
+    2. Com channel/cuid (modo automático): {"channel": "...", "cuid": "...", "userMessage": "..."}
+    
+    No modo automático, a sessão é gerenciada automaticamente com retry em caso de erro.
+    Endpoint direto OCI (sem camada OpenAI/v1).
+    """
+    try:
+        model_config = get_model_config(model_name)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 404
+    
+    model_type = model_config.get("type", "model")
+    if model_type != "agent":
+        return jsonify({"error": f"Modelo '{model_name}' não é um agent. Use type='agent' no JSON."}), 400
+    
+    data = request.get_json() or {}
+    print(f">>> /genai/{model_name}/chat payload recebido:")
+    print(json.dumps(data, ensure_ascii=False, indent=2))
+    
+    user_message = data.get("userMessage")
+    if not user_message:
+        return jsonify({"error": "Parâmetro 'userMessage' é obrigatório"}), 400
+    
+    model_region = model_config.get("region")
+    agent_endpoint_id = model_config.get("id")
+    
+    # Modo 1: sessionId fornecido manualmente
+    session_id = data.get("sessionId")
+    
+    # Modo 2: channel/cuid fornecidos (gerenciamento automático)
+    channel = data.get("channel")
+    cuid = data.get("cuid")
+    
+    # Valida que pelo menos um modo foi fornecido
+    if not session_id and not (channel and cuid):
+        return jsonify({
+            "error": "Forneça 'sessionId' OU ('channel' E 'cuid')",
+            "examples": {
+                "modo_manual": {"sessionId": "ocid1...", "userMessage": "..."},
+                "modo_automatico": {"channel": "web-app", "cuid": "user-123", "userMessage": "..."}
+            }
+        }), 400
+    
+    # Modo automático: gerencia sessão internamente
+    if channel and cuid:
+        session_key = f"{channel}:{cuid}"
+        
+        # Tenta obter/criar sessão
+        sess = session_controller(model_region, agent_endpoint_id, channel, cuid)
+        
+        if "error" in sess:
+            return jsonify({
+                "error": f"Falha ao criar sessão: {sess.get('error')}",
+                "details": sess
+            }), 500
+        
+        session_id = sess.get("id")
+        
+        # Primeira tentativa
+        response_data = ask_agent(model_region, agent_endpoint_id, session_id, user_message)
+        
+        # Se retornou erro 409 (sessão inválida), tenta recuperar
+        if isinstance(response_data, dict) and response_data.get("_http_status") == 409:
+            print(f"[chat] Sessão expirou (409), invalidando e recriando...")
+            
+            # Invalida sessão local
+            _invalidate_session(session_key)
+            
+            # Cria nova sessão
+            sess = session_controller(model_region, agent_endpoint_id, channel, cuid)
+            
+            if "error" in sess:
+                return jsonify({
+                    "error": f"Falha ao recriar sessão após erro 409: {sess.get('error')}",
+                    "details": sess
+                }), 500
+            
+            session_id = sess.get("id")
+            
+            # Retry com nova sessão
+            response_data = ask_agent(model_region, agent_endpoint_id, session_id, user_message)
+            
+            # Se ainda falhou, retorna erro
+            if isinstance(response_data, dict) and response_data.get("_http_status") == 409:
+                return jsonify({
+                    "error": "Falha persistente de sessão após retry",
+                    "details": response_data
+                }), 500
+        
+        # Retorna resposta com informações de sessão
+        return jsonify({
+            "agentResponse": response_data,
+            "sessionInfo": {
+                "sessionId": session_id,
+                "sessionKey": session_key,
+                "reused": sess.get("reused", False)
+            }
         })
-    return jsonify({"object": "list", "data": data})
+    
+    # Modo manual: usa sessionId fornecido
+    else:
+        response_data = ask_agent(model_region, agent_endpoint_id, session_id, user_message)
+        
+        # Se retornou erro 409, informa ao usuário
+        if isinstance(response_data, dict) and response_data.get("_http_status") == 409:
+            return jsonify({
+                "error": "Sessão inválida ou expirada",
+                "suggestion": "Use modo automático com 'channel' e 'cuid' para gerenciamento automático de sessão",
+                "details": response_data
+            }), 409
+        
+        return jsonify({"agentResponse": response_data})
+
+@app.route("/genai/<model_name>/inference", methods=["POST"])
+def oci_inference(model_name):
+    """
+    Inferência direta com modelo LLM (sem formato OpenAI).
+    Endpoint direto OCI (sem camada OpenAI/v1).
+    """
+    try:
+        model_config = get_model_config(model_name)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 404
+    
+    model_type = model_config.get("type", "model")
+    if model_type == "agent":
+        return jsonify({"error": f"'{model_name}' é um agent. Use /genai/{model_name}/chat ao invés de /inference."}), 400
+    
+    data = request.get_json() or {}
+    print(f">>> /genai/{model_name}/inference payload recebido:")
+    print(json.dumps(data, ensure_ascii=False, indent=2))
+    
+    prompt = data.get("prompt")
+    if not prompt:
+        return jsonify({"error": "Campo 'prompt' é obrigatório."}), 400
+    
+    model_region = model_config.get("region")
+    compartment_id = model_config.get("compartmentId")
+    model_ocid = model_config.get("id")
+    
+    # Parâmetros opcionais
+    temperature = data.get("temperature", 1)
+    top_p = data.get("top_p", 1)
+    top_k = data.get("top_k", 0)
+    max_tokens = data.get("max_tokens", 50000)
+    
+    if TEST_MODE:
+        return jsonify({
+            "response": {
+                "text": f"[TEST_MODE] Resposta simulada para: {prompt}",
+                "finish_reason": "stop"
+            }
+        })
+    
+    try:
+        endpoint = f"https://inference.generativeai.{model_region}.oci.oraclecloud.com"
+        client = oci.generative_ai_inference.GenerativeAiInferenceClient(
+            config=config,
+            service_endpoint=endpoint,
+            retry_strategy=oci.retry.NoneRetryStrategy(),
+            timeout=(10, 240)
+        )
+        
+        # Cria mensagem
+        content = oci.generative_ai_inference.models.TextContent()
+        content.text = str(prompt)
+        message = oci.generative_ai_inference.models.Message()
+        message.role = "USER"
+        message.content = [content]
+        
+        # Cria chat request
+        chat_request = oci.generative_ai_inference.models.GenericChatRequest()
+        chat_request.api_format = oci.generative_ai_inference.models.BaseChatRequest.API_FORMAT_GENERIC
+        chat_request.messages = [message]
+        chat_request.max_tokens = max_tokens
+        chat_request.temperature = temperature
+        chat_request.top_p = top_p
+        chat_request.top_k = top_k
+        
+        # Cria chat detail
+        chat_detail = oci.generative_ai_inference.models.ChatDetails()
+        chat_detail.serving_mode = oci.generative_ai_inference.models.OnDemandServingMode(model_id=model_ocid)
+        chat_detail.chat_request = chat_request
+        chat_detail.compartment_id = compartment_id
+        
+        # Faz chamada
+        chat_response = client.chat(chat_detail)
+        chat_choices = chat_response.data.chat_response.choices
+        
+        chat_data = {
+            "text": chat_choices[0].message.content[0].text,
+            "finish_reason": chat_choices[0].finish_reason
+        }
+        
+        return jsonify({"response": chat_data})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 # ==========================
 # Main
 # ==========================
 
 if __name__ == '__main__':
-    # Observação: para produção, use um servidor WSGI (gunicorn/uwsgi) atrás de um proxy.
-    app.run(host='0.0.0.0', port=8000)
+    print("=" * 60)
+    print("OCI GenAI Proxy v2.0.3")
+    app.run(host='0.0.0.0', port=8000, debug=False)
