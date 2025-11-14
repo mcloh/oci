@@ -429,16 +429,6 @@ CORS habilitado por padrão para `*`. Edite `app.py` para restringir.
 
 ---
 
-## 📚 Documentação Completa
-
-Para documentação detalhada, consulte:
-- `CHAT_FUSIONADO_v2.0.4.md` - Endpoint /chat com gerenciamento automático
-- `ENDPOINTS_OCI_DIRETOS.md` - Endpoints diretos OCI
-- `EXPLICACAO_CHAMADAS_OCI.md` - Detalhes técnicos internos
-- `CHANGELOG.md` - Histórico de versões
-
----
-
 ## 🎯 Resumo Rápido
 
 ### **Para Models:**
