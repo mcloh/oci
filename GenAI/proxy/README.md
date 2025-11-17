@@ -271,7 +271,7 @@ X-API-Key: YOUR_API_KEY
 | Parâmetro | Tipo | Obrigatório | Descrição |
 |-----------|------|-------------|-----------|
 | `channel` | string | ✅ | Canal (ex: `web-app`, `mobile-app`) |
-| `cuid` | string | ✅ | Customer User ID |
+| `cuid` | string | ✅ | Channel/User ID |
 | `userMessage` | string | ✅ | Mensagem do usuário |
 
 ### **Inferência Direta:**
