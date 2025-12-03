@@ -153,8 +153,8 @@ Ao seguir todos os prompts, você terá um projeto completo com:
 
 Os prompts incluem configuração para:
 - **URL Base:** `https://api.xptoai.com.br/genai/grokcode/v1`
-- **API Key:** `biasb986lk657fsdv6d3543vs5b65s7v373sd321vsdv4sdv34bv3f4hb5f4j6mn546tu`
-- **Modelo:** `grok-2-1212`
+- **API Key:** `chave de API do serviço de LLM`
+- **Modelo:** `grokcode`
 
 ⚠️ **Nota:** Em produção, use variáveis de ambiente para credenciais.
 
