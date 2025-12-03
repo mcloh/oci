@@ -36,8 +36,8 @@ REQUISITOS FUNCIONAIS:
 
 2. INTEGRAÇÃO COM LLM:
    - API Base URL: "https://api.xptoai.com.br/genai/grokcode/v1"
-   - API Key: "biasb986lk657fsdv6d3543vs5b65s7v373sd321vsdv4sdv34bv3f4hb5f4j6mn546tu"
-   - Modelo: "grok-2-1212"
+   - API Key: "chave de API para o serviço de LLM"
+   - Modelo: "grokcode"
    - Usar OpenAI SDK (compatível)
 
 3. INTERPRETAÇÃO INTELIGENTE:
