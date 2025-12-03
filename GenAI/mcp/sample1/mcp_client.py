@@ -14,8 +14,8 @@ from openai import OpenAI
 
 # Configuração do LLM
 API_BASE_URL = "https://api.xptoai.com.br/genai/grokcode/v1"
-API_KEY = "biasb986lk657fsdv6d3543vs5b65s7v373sd321vsdv4sdv34bv3f4hb5f4j6mn546tu"
-MODEL_NAME = "grok-2-1212"  # Modelo padrão, pode ser ajustado
+API_KEY = "sua chave de API para o endopoint do LLM"
+MODEL_NAME = "grokcode"  # Modelo padrão, pode ser ajustado
 
 
 class MCPChatClient:
