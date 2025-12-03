@@ -407,14 +407,14 @@ Verifique se o servidor MCP está sendo iniciado corretamente pelo cliente.
 
 Verifique se a chave de API está correta em `mcp_client.py`:
 ```python
-API_KEY = "biasb986lk657fsdv6d3543vs5b65s7v373sd321vsdv4sdv34bv3f4hb5f4j6mn546tu"
+API_KEY = "sua chave de API para o endpoint de serviço do LLM"
 ```
 
 ### Erro: "Model not found"
 
 Ajuste o nome do modelo em `mcp_client.py` se necessário:
 ```python
-MODEL_NAME = "grok-2-1212"  # Ajuste conforme disponível na API
+MODEL_NAME = "grokcode"  # Ajuste conforme disponível na API
 ```
 
 ### Erro: "Divisão por zero"
