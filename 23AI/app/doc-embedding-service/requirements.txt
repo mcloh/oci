@@ -1,0 +1,26 @@
+# Web Framework
+flask==3.0.0
+flask-cors==4.0.0
+
+# OCI SDK
+oci==2.119.1
+
+# Database
+oracledb==2.0.0
+
+# Document Processing
+PyPDF2==3.0.1
+python-docx==1.1.0
+pytesseract==0.3.10
+Pillow==10.1.0
+pdf2image==1.16.3
+
+# Text Processing and Embeddings
+sentence-transformers==2.2.2
+langchain==0.1.0
+langchain-community==0.0.10
+tiktoken==0.5.2
+
+# Utilities
+python-dotenv==1.0.0
+requests==2.31.0

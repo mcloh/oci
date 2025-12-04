@@ -1,0 +1,64 @@
+version: '3.8'
+
+services:
+  doc-embedding-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: doc-embedding-service
+    ports:
+      - "8000:8000"
+    environment:
+      # API Security
+      - API_KEY=${API_KEY}
+      
+      # OCI Configuration
+      - OCI_CONFIG_FILE=/app/config/credentials.conf
+      - OCI_REGION=${OCI_REGION:-us-chicago-1}
+      - TEST_MODE=${TEST_MODE:-false}
+      
+      # Database Configuration
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_DSN=${DB_DSN}
+      
+      # Embedding Configuration
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-sentence-transformers/all-MiniLM-L6-v2}
+      - EMBEDDING_DIMENSION=${EMBEDDING_DIMENSION:-384}
+      - CHUNK_SIZE=${CHUNK_SIZE:-500}
+      - CHUNK_OVERLAP=${CHUNK_OVERLAP:-50}
+      
+      # Application Configuration
+      - UPLOAD_FOLDER=/app/uploads
+      - MAX_UPLOAD_SIZE=${MAX_UPLOAD_SIZE:-52428800}
+      - DEBUG_AUTH=${DEBUG_AUTH:-false}
+      - PORT=8000
+    
+    volumes:
+      # Monta diretório de uploads
+      - ./uploads:/app/uploads
+      
+      # Monta diretório de logs
+      - ./logs:/app/logs
+      
+      # Monta configuração OCI (se existir localmente)
+      - ./config:/app/config:ro
+      
+      # Monta chave privada OCI (se necessário)
+      # - /path/to/oci_api_key.pem:/app/oci_api_key.pem:ro
+    
+    restart: unless-stopped
+    
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    
+    networks:
+      - doc-embedding-network
+
+networks:
+  doc-embedding-network:
+    driver: bridge
