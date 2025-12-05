@@ -6,8 +6,9 @@
 #   export API_KEY="minha-chave"
 #   export GENAI_BUCKET="lohmann-ai-br"
 #   export GENAI_UPLOAD_PREFIX="genai-uploads/"
-#   export LLM_CONFIG_PATH="/home/app/llm_models.json"
-#   export DEBUG_AUTH=true  # opcional
+#   export OCI_CONFIG_FILE="./credentials.conf"  # opcional, padrão: ./credentials.conf
+#   export LLM_CONFIG_PATH="./llm_models.json"    # opcional, padrão: ./llm_models.json
+#   export DEBUG_AUTH=true                        # opcional
 #   python app.py  # porta 8000
 # -----------------------------------------------------------------------------
 
@@ -22,8 +23,17 @@ import base64
 import time
 import mimetypes
 import hmac
+import logging
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Generator
+from functools import lru_cache, wraps
+
+# Configurar logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
@@ -42,7 +52,7 @@ try:
         methods=["GET", "POST", "OPTIONS"]
     )
 except Exception as _e:
-    print("AVISO: flask-cors não instalado; CORS mínimo será aplicado via after_request.")
+    logger.warning("flask-cors não instalado; CORS mínimo será aplicado via after_request.")
 
 @app.after_request
 def add_cors_headers(resp):
@@ -52,10 +62,34 @@ def add_cors_headers(resp):
     return resp
 
 # ==========================
+# Constantes de Parâmetros de Modelo
+# ==========================
+
+# Parâmetros de modelo com mapeamento 1:1 (sem transformação)
+SIMPLE_MODEL_PARAMS = [
+    "temperature",
+    "top_p",
+    "top_k",
+    "frequency_penalty",
+    "presence_penalty",
+    "reasoning_effort",
+    "verbosity"
+]
+
+# ==========================
 # Configuração e Autenticação OCI
 # ==========================
 
-def load_config(config_file="/home/app/credentials.conf"):
+def load_config(config_file=None):
+    """Carrega configuração OCI de arquivo.
+    
+    Args:
+        config_file: Caminho do arquivo de configuração. Se None, usa variável de ambiente OCI_CONFIG_FILE
+                     ou padrão './credentials.conf'
+    """
+    if config_file is None:
+        config_file = os.environ.get("OCI_CONFIG_FILE", "./credentials.conf")
+    
     config = {}
     try:
         with open(config_file, 'r') as f:
@@ -85,8 +119,8 @@ if not TEST_MODE:
             private_key_content=config.get("key_content"),
         )
     except Exception as e:
-        print(f"Erro ao inicializar signer OCI: {e}")
-        print("Executando em modo de teste...")
+        logger.error(f"Erro ao inicializar signer OCI: {e}")
+        logger.info("Executando em modo de teste...")
         TEST_MODE = True
 
 # ==========================
@@ -111,7 +145,7 @@ def _parse_bearer_token(auth_header: str) -> str:
 def check_api_key():
     expected_key = os.environ.get("API_KEY")
     if not expected_key:
-        print("AVISO: API_KEY não configurada nas variáveis de ambiente.")
+        logger.warning("API_KEY não configurada nas variáveis de ambiente.")
         return
 
     provided_key = request.headers.get("X-API-Key")
@@ -119,7 +153,7 @@ def check_api_key():
     bearer_token = _parse_bearer_token(auth_header)
 
     if DEBUG_AUTH:
-        print(f"[auth] method={request.method} path={request.path} "
+        logger.debug(f"[auth] method={request.method} path={request.path} "
               f"X-API-Key={'<set>' if provided_key else '<none>'} "
               f"Authorization={'<set>' if auth_header else '<none>'}")
 
@@ -152,10 +186,25 @@ if not TEST_MODE:
         object_client = oci.object_storage.ObjectStorageClient(config)
         namespace = object_client.get_namespace().data
     except Exception as e:
-        print(f"Erro ao inicializar ObjectStorageClient: {e}")
+        logger.error(f"Erro ao inicializar ObjectStorageClient: {e}")
         TEST_MODE = True
 
 FILE_INDEX: Dict[str, str] = {}
+
+# ==========================
+# Cache de Clientes OCI
+# ==========================
+
+@lru_cache(maxsize=10)
+def get_oci_inference_client(region: str) -> 'oci.generative_ai_inference.GenerativeAiInferenceClient':
+    """Retorna cliente OCI GenAI Inference com cache"""
+    endpoint = f"https://inference.generativeai.{region}.oci.oraclecloud.com"
+    return oci.generative_ai_inference.GenerativeAiInferenceClient(
+        config=config,
+        service_endpoint=endpoint,
+        retry_strategy=oci.retry.NoneRetryStrategy(),
+        timeout=(10, 240)
+    )
 
 # ==========================
 # Helpers: Signed URL (PAR) + Upload
@@ -214,7 +263,7 @@ def upload_file_to_bucket(file_storage, filename: str) -> Dict[str, Any]:
 # Modelos — JSON externo (hot-reload) 
 # ==========================
 
-LLM_CONFIG_PATH = os.environ.get("LLM_CONFIG_PATH", "/home/app/llm_models.json")
+LLM_CONFIG_PATH = os.environ.get("LLM_CONFIG_PATH", "./llm_models.json")
 
 SUPPORTED_MODELS_DEFAULTS: Dict[str, Dict[str, Any]] = {
     "gpt5": {
@@ -244,7 +293,7 @@ def get_supported_models() -> Dict[str, Dict[str, Any]]:
             raise ValueError("Arquivo de modelos não contém 'models' válidos.")
         return valid
     except Exception as e:
-        print(f"[warn] Usando SUPPORTED_MODELS_DEFAULTS (motivo: {e})")
+        logger.warning(f"Usando SUPPORTED_MODELS_DEFAULTS (motivo: {e})")
         return SUPPORTED_MODELS_DEFAULTS
 
 def get_model_config(model_name: str) -> Dict[str, Any]:
@@ -278,7 +327,7 @@ def session_controller(region, agent_endpoint_id, channel, cuid):
         SESSION_STORE[session_key] = {
             "sessionId": new_session_id, "createdAt": now, "lastUsedAt": now, "sessionKey": session_key
         }
-        print(f"[agent] nova sessão criada (TEST): key={session_key} id={new_session_id}")
+        logger.info(f"[agent] nova sessão criada (TEST): key={session_key} id={new_session_id}")
         return {"id": new_session_id, "sessionKey": session_key, "reused": False}
 
     try:
@@ -300,7 +349,7 @@ def session_controller(region, agent_endpoint_id, channel, cuid):
         SESSION_STORE[session_key] = {
             "sessionId": data.get("id"), "createdAt": now, "lastUsedAt": now, "sessionKey": session_key
         }
-        print(f"[agent] nova sessão criada: key={session_key} id={data.get('id')}")
+        logger.info(f"[agent] nova sessão criada: key={session_key} id={data.get('id')}")
         data["sessionKey"] = session_key
         data["reused"] = False
         return data
@@ -311,7 +360,7 @@ def _invalidate_session(session_key: str):
     try:
         if session_key in SESSION_STORE:
             del SESSION_STORE[session_key]
-            print(f"[agent] sessão invalidada: key={session_key}")
+            logger.info(f"[agent] sessão invalidada: key={session_key}")
     except Exception:
         pass
 
@@ -365,7 +414,7 @@ def ensure_data_url(image_url: str) -> str:
         b64 = base64.b64encode(content).decode("utf-8")
         return f"data:{mime};base64,{b64}"
     except Exception as e:
-        print(f"[warn] Falha ao baixar imagem '{image_url}': {e}")
+        logger.warning(f"Falha ao baixar imagem '{image_url}': {e}")
         return image_url
 
 def to_oci_messages(openai_messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -402,24 +451,18 @@ def to_oci_messages(openai_messages: List[Dict[str, Any]]) -> List[Dict[str, Any
 def build_oci_chat_payload(messages: List[Dict[str, Any]], params: Dict[str, Any]) -> Dict[str, Any]:
     """Constrói payload para OCI Chat API"""
     payload = {"messages": messages}
-    if "temperature" in params:
-        payload["temperature"] = params["temperature"]
-    if "top_p" in params:
-        payload["top_p"] = params["top_p"]
-    if "top_k" in params:
-        payload["top_k"] = params["top_k"]
-    if "frequency_penalty" in params:
-        payload["frequency_penalty"] = params["frequency_penalty"]
-    if "presence_penalty" in params:
-        payload["presence_penalty"] = params["presence_penalty"]
+    
+    # Parâmetros simples (mapeamento 1:1)
+    for param in SIMPLE_MODEL_PARAMS:
+        if param in params:
+            payload[param] = params[param]
+    
+    # Tratamento especial: max_tokens → max_completion_tokens (compatibilidade OpenAI)
     if "max_completion_tokens" in params:
         payload["max_completion_tokens"] = params["max_completion_tokens"]
     elif "max_tokens" in params:
         payload["max_completion_tokens"] = params["max_tokens"]
-    if "reasoning_effort" in params:
-        payload["reasoning_effort"] = params["reasoning_effort"]
-    if "verbosity" in params:
-        payload["verbosity"] = params["verbosity"]
+    
     return payload
 
 def extract_token_usage(oci_response: Any) -> Dict[str, Optional[int]]:
@@ -449,14 +492,91 @@ def extract_token_usage(oci_response: Any) -> Dict[str, Optional[int]]:
                     if usage["total_tokens"] is None and usage["prompt_tokens"] and usage["completion_tokens"]:
                         usage["total_tokens"] = usage["prompt_tokens"] + usage["completion_tokens"]
     except Exception as e:
-        print(f"[warn] Erro ao extrair token usage: {e}")
+        logger.warning(f"Erro ao extrair token usage: {e}")
+    
+    return usage
+
+def extract_agent_token_usage(agent_response):
+    """
+    Extrai informações de token usage de uma resposta de agente OCI.
+    Suporta múltiplas etapas de tool calling.
+    
+    Estrutura esperada:
+    {
+        "traces": [
+            {
+                "traceType": "GENERATION_TRACE",
+                "usage": [
+                    {
+                        "usageDetails": {
+                            "inputTokenCount": int,
+                            "outputTokenCount": int
+                        }
+                    }
+                ]
+            }
+        ]
+    }
+    
+    Args:
+        agent_response: Resposta do agente (dict)
+    
+    Returns:
+        dict: {"prompt_tokens": int, "completion_tokens": int, "total_tokens": int}
+    """
+    usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    
+    if not agent_response or not isinstance(agent_response, dict):
+        return usage
+    
+    try:
+        # Obter traces
+        traces = agent_response.get('traces', [])
+        
+        total_input_tokens = 0
+        total_output_tokens = 0
+        
+        # Iterar por todos os traces
+        for trace in traces:
+            # Verificar se é um GENERATION_TRACE (pode vir como traceType ou trace_type)
+            trace_type = trace.get('traceType') or trace.get('trace_type', '')
+            
+            if trace_type == 'GENERATION_TRACE':
+                # Obter lista de usage
+                usage_list = trace.get('usage', [])
+                
+                # Iterar por cada entrada de usage
+                for usage_entry in usage_list:
+                    # Obter usageDetails (pode vir como usageDetails ou usage_details)
+                    usage_details = usage_entry.get('usageDetails') or usage_entry.get('usage_details', {})
+                    
+                    # Extrair contagens (pode vir em camelCase ou snake_case)
+                    input_tokens = (
+                        usage_details.get('inputTokenCount') or 
+                        usage_details.get('input_token_count', 0)
+                    )
+                    output_tokens = (
+                        usage_details.get('outputTokenCount') or 
+                        usage_details.get('output_token_count', 0)
+                    )
+                    
+                    total_input_tokens += input_tokens
+                    total_output_tokens += output_tokens
+        
+        # Atualizar usage com os totais
+        usage["prompt_tokens"] = total_input_tokens
+        usage["completion_tokens"] = total_output_tokens
+        usage["total_tokens"] = total_input_tokens + total_output_tokens
+        
+    except Exception as e:
+        logger.warning(f"Erro ao extrair token usage de agente: {e}")
     
     return usage
 
 def oci_chat_invoke(model_region: str, compartment_id: str, model_ocid: str, oci_payload: Dict[str, Any]) -> Dict[str, Any]:
     """Invoca modelo OCI GenAI e retorna resposta com token usage"""
-    print(">>> OCI CHAT REQUEST (payload que será enviado):")
-    print(json.dumps(oci_payload, ensure_ascii=False, indent=2))
+    logger.debug(">>> OCI CHAT REQUEST (payload que será enviado):")
+    logger.debug(json.dumps(oci_payload, ensure_ascii=False, indent=2))
 
     if TEST_MODE:
         return {
@@ -468,10 +588,7 @@ def oci_chat_invoke(model_region: str, compartment_id: str, model_ocid: str, oci
         }
 
     try:
-        endpoint = f"https://inference.generativeai.{model_region}.oci.oraclecloud.com"
-        client = oci.generative_ai_inference.GenerativeAiInferenceClient(
-            config=config, service_endpoint=endpoint, retry_strategy=oci.retry.NoneRetryStrategy(), timeout=(10, 240)
-        )
+        client = get_oci_inference_client(model_region)
 
         chat_detail = oci.generative_ai_inference.models.ChatDetails()
         generic = oci.generative_ai_inference.models.GenericChatRequest()
@@ -499,18 +616,14 @@ def oci_chat_invoke(model_region: str, compartment_id: str, model_ocid: str, oci
 
         generic.messages = sdk_messages
 
-        if "temperature" in oci_payload:
-            generic.temperature = oci_payload["temperature"]
-        if "top_p" in oci_payload:
-            generic.top_p = oci_payload["top_p"]
-        if "top_k" in oci_payload:
-            generic.top_k = oci_payload["top_k"]
-        if "frequency_penalty" in oci_payload:
-            generic.frequency_penalty = oci_payload["frequency_penalty"]
-        if "presence_penalty" in oci_payload:
-            generic.presence_penalty = oci_payload["presence_penalty"]
+        # Parâmetros simples (mapeamento 1:1)
+        for param in SIMPLE_MODEL_PARAMS:
+            if param in oci_payload:
+                setattr(generic, param, oci_payload[param])
+        
+        # Tratamento especial: max_completion_tokens
         if "max_completion_tokens" in oci_payload:
-            generic.max_tokens = oci_payload["max_completion_tokens"]
+            generic.max_completion_tokens = oci_payload["max_completion_tokens"]
 
         chat_detail.serving_mode = oci.generative_ai_inference.models.OnDemandServingMode(model_id=model_ocid)
         chat_detail.chat_request = generic
@@ -705,6 +818,191 @@ def _extract_agent_text(agent_payload: Any) -> str:
 def test():
     return jsonify({"test": "ok", "version": "2.0-refactored"})
 
+# ==========================
+# Endpoints Globais OpenAI v1 (compatibilidade total com SDK OpenAI)
+# ==========================
+
+@app.route("/v1/models", methods=["GET"])
+def list_all_models():
+    """
+    Lista todos os modelos disponíveis.
+    Compatível com: OpenAI SDK client.models.list()
+    """
+    supported = get_supported_models()
+    now = int(time.time())
+    models_list = []
+    
+    for name, cfg in supported.items():
+        models_list.append({
+            "id": name,
+            "object": "model",
+            "created": now,
+            "owned_by": "oci.genai",
+            "permission": [],
+            "root": name,
+            "parent": None,
+            "type": cfg.get("type", "model"),
+            "region": cfg.get("region"),
+            "ocid": cfg.get("id"),
+            "compartmentId": cfg.get("compartmentId"),
+            "params": cfg.get("params", {})
+        })
+    
+    return jsonify({"object": "list", "data": models_list})
+
+@app.route("/v1/models/<model_id>", methods=["GET"])
+def get_model_info(model_id):
+    """
+    Retorna informações de um modelo específico.
+    Compatível com: OpenAI SDK client.models.retrieve(model_id)
+    """
+    try:
+        model_config = get_model_config(model_id)
+        return jsonify({
+            "id": model_id,
+            "object": "model",
+            "created": int(time.time()),
+            "owned_by": "oci.genai",
+            "permission": [],
+            "root": model_id,
+            "parent": None,
+            "ocid": model_config.get("id"),
+            "compartmentId": model_config.get("compartmentId"),
+            "region": model_config.get("region"),
+            "type": model_config.get("type", "model"),
+            "params": model_config.get("params", {})
+        })
+    except ValueError as e:
+        return jsonify({"error": {"message": str(e), "type": "invalid_request_error", "code": "model_not_found"}}), 404
+
+@app.route("/v1/chat/completions", methods=["POST"])
+def global_chat_completions():
+    """
+    Chat completion global.
+    Compatível com: OpenAI SDK client.chat.completions.create()
+    """
+    try:
+        body = request.get_json(force=True, silent=False) or {}
+    except Exception as e:
+        return jsonify({"error": {"message": f"JSON inválido: {e}", "type": "invalid_request_error"}}), 400
+
+    model_name = body.get("model")
+    if not model_name:
+        return jsonify({"error": {"message": "Campo 'model' é obrigatório", "type": "invalid_request_error", "param": "model"}}), 400
+
+    try:
+        model_config = get_model_config(model_name)
+    except ValueError as e:
+        return jsonify({"error": {"message": str(e), "type": "invalid_request_error", "code": "model_not_found"}}), 404
+
+    # Redireciona para a lógica existente baseado no tipo
+    if model_config.get("type") == "agent":
+        return _handle_agent_chat(model_name, model_config, body)
+    
+    # Lógica para modelos
+    msgs = body.get("messages") or []
+    if not isinstance(msgs, list) or not msgs:
+        return jsonify({"error": {"message": "Campo 'messages' é obrigatório e deve ser uma lista", "type": "invalid_request_error", "param": "messages"}}), 400
+
+    params = model_config.get("params", {}).copy()
+    for k in ["temperature", "top_p", "top_k", "max_tokens", "frequency_penalty", 
+              "presence_penalty", "reasoning_effort", "verbosity", "max_completion_tokens"]:
+        if k in body and body[k] is not None:
+            params[k] = body[k]
+
+    oci_msgs = to_oci_messages(msgs)
+    oci_payload = build_oci_chat_payload(oci_msgs, params)
+    
+    model_region = model_config.get("region")
+    compartment_id = model_config.get("compartmentId")
+    model_ocid = model_config.get("id")
+    
+    oci_result = oci_chat_invoke(model_region, compartment_id, model_ocid, oci_payload)
+
+    if isinstance(oci_result, dict):
+        output_text = oci_result.get("output_text")
+        usage = oci_result.get("usage", {})
+    else:
+        output_text = None
+        usage = {}
+
+    if output_text is None:
+        output_text = json.dumps(oci_result, ensure_ascii=False)
+
+    if body.get("stream") is True:
+        return Response(
+            stream_with_context(sse_chat_stream(model_name, output_text)),
+            mimetype="text/event-stream"
+        )
+
+    return jsonify(to_openai_chat_response(model_name, output_text, usage))
+
+@app.route("/v1/completions", methods=["POST"])
+def global_text_completions():
+    """
+    Text completion global.
+    Compatível com: OpenAI SDK client.completions.create()
+    """
+    try:
+        body = request.get_json(force=True, silent=False) or {}
+    except Exception as e:
+        return jsonify({"error": {"message": f"JSON inválido: {e}", "type": "invalid_request_error"}}), 400
+
+    model_name = body.get("model")
+    if not model_name:
+        return jsonify({"error": {"message": "Campo 'model' é obrigatório", "type": "invalid_request_error", "param": "model"}}), 400
+
+    try:
+        model_config = get_model_config(model_name)
+    except ValueError as e:
+        return jsonify({"error": {"message": str(e), "type": "invalid_request_error", "code": "model_not_found"}}), 404
+
+    # Redireciona para a lógica existente baseado no tipo
+    if model_config.get("type") == "agent":
+        return _handle_agent_completion(model_name, model_config, body)
+    
+    # Lógica para modelos
+    prompt = body.get("prompt")
+    if not prompt:
+        return jsonify({"error": {"message": "Campo 'prompt' é obrigatório", "type": "invalid_request_error", "param": "prompt"}}), 400
+
+    params = model_config.get("params", {}).copy()
+    for k in ["temperature", "top_p", "top_k", "max_tokens", "frequency_penalty", "presence_penalty"]:
+        if k in body and body[k] is not None:
+            params[k] = body[k]
+
+    # Converte prompt para formato de mensagem
+    msgs = [{"role": "USER", "content": [{"type": "TEXT", "text": str(prompt)}]}]
+    oci_payload = build_oci_chat_payload(msgs, params)
+    
+    model_region = model_config.get("region")
+    compartment_id = model_config.get("compartmentId")
+    model_ocid = model_config.get("id")
+    
+    oci_result = oci_chat_invoke(model_region, compartment_id, model_ocid, oci_payload)
+
+    if isinstance(oci_result, dict):
+        output_text = oci_result.get("output_text")
+        usage = oci_result.get("usage", {})
+    else:
+        output_text = None
+        usage = {}
+
+    if output_text is None:
+        output_text = json.dumps(oci_result, ensure_ascii=False)
+
+    if body.get("stream") is True:
+        return Response(
+            stream_with_context(sse_chat_stream(model_name, output_text)),
+            mimetype="text/event-stream"
+        )
+
+    return jsonify(to_openai_text_response(model_name, output_text, usage))
+
+# ==========================
+# Endpoints OpenAI v1 — ESTRUTURA /genai/{modelname}/v1/...
+# ==========================
+
 @app.route("/genai/<model_name>/v1/models", methods=["GET"])
 def v1_models(model_name):
     """
@@ -741,8 +1039,8 @@ def v1_chat_completions(model_name):
     except Exception as e:
         return jsonify({"error": f"JSON inválido: {e}"}), 400
 
-    print(f">>> /genai/{model_name}/v1/chat/completions body recebido:")
-    print(json.dumps(body, ensure_ascii=False, indent=2))
+    logger.debug(f">>> /genai/{model_name}/v1/chat/completions body recebido:")
+    logger.debug(json.dumps(body, ensure_ascii=False, indent=2))
 
     try:
         model_config = get_model_config(model_name)
@@ -853,8 +1151,8 @@ def _handle_agent_chat(model_name: str, model_config: Dict[str, Any], body: Dict
             mimetype="text/event-stream"
         )
 
-    # Resposta normal (agents não retornam token usage real, então usamos None)
-    usage = {"prompt_tokens": None, "completion_tokens": None, "total_tokens": None}
+    # Extrair token usage da resposta do agente
+    usage = extract_agent_token_usage(agent_resp)
     resp = to_openai_chat_response(model_name, response_text, usage)
     resp["_agent"] = {"session_id": session_id, "reused": sess.get("reused", False)}
     return jsonify(resp)
@@ -888,7 +1186,7 @@ def _handle_agent_completion(model_name: str, model_config: Dict[str, Any], body
     
     if "error" in sess:
         # Se falhar ao criar sessão, tenta continuar sem sessão (alguns agents não precisam)
-        print(f"[warn] Falha ao criar sessão para agent: {sess['error']}")
+        logger.warning(f"Falha ao criar sessão para agent: {sess['error']}")
         session_error = True
     else:
         session_id = sess["id"]
@@ -930,8 +1228,8 @@ def _handle_agent_completion(model_name: str, model_config: Dict[str, Any], body
             mimetype="text/event-stream"
         )
     
-    # Resposta normal (agents não retornam token usage real)
-    usage = {"prompt_tokens": None, "completion_tokens": None, "total_tokens": None}
+    # Extrair token usage da resposta do agente
+    usage = extract_agent_token_usage(agent_resp)
     resp = to_openai_text_response(model_name, response_text, usage)
     if session_id:
         resp["_agent"] = {"session_id": session_id, "reused": sess.get("reused", False)}
@@ -945,8 +1243,8 @@ def v1_text_completions(model_name):
     except Exception as e:
         return jsonify({"error": f"JSON inválido: {e}"}), 400
 
-    print(f">>> /genai/{model_name}/v1/completions body recebido:")
-    print(json.dumps(body, ensure_ascii=False, indent=2))
+    logger.debug(f">>> /genai/{model_name}/v1/completions body recebido:")
+    logger.debug(json.dumps(body, ensure_ascii=False, indent=2))
 
     try:
         model_config = get_model_config(model_name)
@@ -1137,8 +1435,8 @@ def oci_session(model_name):
         return jsonify({"error": f"Modelo '{model_name}' não é um agent. Use type='agent' no JSON."}), 400
     
     data = request.get_json() or {}
-    print(f">>> /genai/{model_name}/session payload recebido:")
-    print(json.dumps(data, ensure_ascii=False, indent=2))
+    logger.debug(f">>> /genai/{model_name}/session payload recebido:")
+    logger.debug(json.dumps(data, ensure_ascii=False, indent=2))
     
     channel = data.get("channel")
     cuid = data.get("cuid")
@@ -1151,6 +1449,53 @@ def oci_session(model_name):
     
     response_data = session_controller(model_region, agent_endpoint_id, channel, cuid)
     return jsonify(response_data)
+
+def _chat_with_retry_on_session_expired(model_region, agent_endpoint_id, session_id, session_key, user_message):
+    """
+    Envia mensagem ao agente com retry automático em caso de sessão expirada (409).
+    
+    Returns:
+        tuple: (response_data, session_id, error_response)
+        - Se sucesso: (response_data, session_id, None)
+        - Se erro: (None, None, error_response)
+    """
+    # Primeira tentativa
+    response_data = ask_agent(model_region, agent_endpoint_id, session_id, user_message)
+    
+    # Se retornou erro 409 (sessão inválida), tenta recuperar
+    if isinstance(response_data, dict) and response_data.get("_http_status") == 409:
+        logger.info(f"[chat] Sessão expirou (409), invalidando e recriando...")
+        
+        # Invalida sessão local
+        _invalidate_session(session_key)
+        
+        # Extrai channel e cuid do session_key
+        channel, cuid = session_key.split(":", 1)
+        
+        # Cria nova sessão
+        sess = session_controller(model_region, agent_endpoint_id, channel, cuid)
+        
+        if "error" in sess:
+            return None, None, (jsonify({
+                "error": f"Falha ao recriar sessão após erro 409: {sess.get('error')}",
+                "details": sess
+            }), 500)
+        
+        new_session_id = sess.get("id")
+        
+        # Retry com nova sessão
+        response_data = ask_agent(model_region, agent_endpoint_id, new_session_id, user_message)
+        
+        # Se ainda falhou, retorna erro
+        if isinstance(response_data, dict) and response_data.get("_http_status") == 409:
+            return None, None, (jsonify({
+                "error": "Falha persistente de sessão após retry",
+                "details": response_data
+            }), 500)
+        
+        return response_data, new_session_id, None
+    
+    return response_data, session_id, None
 
 @app.route("/genai/<model_name>/chat", methods=["POST"])
 def oci_chat(model_name):
@@ -1174,8 +1519,8 @@ def oci_chat(model_name):
         return jsonify({"error": f"Modelo '{model_name}' não é um agent. Use type='agent' no JSON."}), 400
     
     data = request.get_json() or {}
-    print(f">>> /genai/{model_name}/chat payload recebido:")
-    print(json.dumps(data, ensure_ascii=False, indent=2))
+    logger.debug(f">>> /genai/{model_name}/chat payload recebido:")
+    logger.debug(json.dumps(data, ensure_ascii=False, indent=2))
     
     user_message = data.get("userMessage")
     if not user_message:
@@ -1201,13 +1546,12 @@ def oci_chat(model_name):
             }
         }), 400
     
-    # Modo automático: gerencia sessão internamente
+    # Modo automático: gerencia sessão internamente com retry
     if channel and cuid:
         session_key = f"{channel}:{cuid}"
         
-        # Tenta obter/criar sessão
+        # Obter/criar sessão
         sess = session_controller(model_region, agent_endpoint_id, channel, cuid)
-        
         if "error" in sess:
             return jsonify({
                 "error": f"Falha ao criar sessão: {sess.get('error')}",
@@ -1216,45 +1560,24 @@ def oci_chat(model_name):
         
         session_id = sess.get("id")
         
-        # Primeira tentativa
-        response_data = ask_agent(model_region, agent_endpoint_id, session_id, user_message)
+        # Enviar mensagem com retry automático
+        response_data, session_id, error = _chat_with_retry_on_session_expired(
+            model_region, agent_endpoint_id, session_id, session_key, user_message
+        )
         
-        # Se retornou erro 409 (sessão inválida), tenta recuperar
-        if isinstance(response_data, dict) and response_data.get("_http_status") == 409:
-            print(f"[chat] Sessão expirou (409), invalidando e recriando...")
-            
-            # Invalida sessão local
-            _invalidate_session(session_key)
-            
-            # Cria nova sessão
-            sess = session_controller(model_region, agent_endpoint_id, channel, cuid)
-            
-            if "error" in sess:
-                return jsonify({
-                    "error": f"Falha ao recriar sessão após erro 409: {sess.get('error')}",
-                    "details": sess
-                }), 500
-            
-            session_id = sess.get("id")
-            
-            # Retry com nova sessão
-            response_data = ask_agent(model_region, agent_endpoint_id, session_id, user_message)
-            
-            # Se ainda falhou, retorna erro
-            if isinstance(response_data, dict) and response_data.get("_http_status") == 409:
-                return jsonify({
-                    "error": "Falha persistente de sessão após retry",
-                    "details": response_data
-                }), 500
+        if error:
+            return error
         
-        # Retorna resposta com informações de sessão
+        # Extrair token usage e retornar
+        usage = extract_agent_token_usage(response_data)
         return jsonify({
             "agentResponse": response_data,
             "sessionInfo": {
                 "sessionId": session_id,
                 "sessionKey": session_key,
                 "reused": sess.get("reused", False)
-            }
+            },
+            "usage": usage
         })
     
     # Modo manual: usa sessionId fornecido
@@ -1269,7 +1592,13 @@ def oci_chat(model_name):
                 "details": response_data
             }), 409
         
-        return jsonify({"agentResponse": response_data})
+        # Extrair token usage da resposta do agente
+        usage = extract_agent_token_usage(response_data)
+        
+        return jsonify({
+            "agentResponse": response_data,
+            "usage": usage
+        })
 
 @app.route("/genai/<model_name>/inference", methods=["POST"])
 def oci_inference(model_name):
@@ -1287,8 +1616,8 @@ def oci_inference(model_name):
         return jsonify({"error": f"'{model_name}' é um agent. Use /genai/{model_name}/chat ao invés de /inference."}), 400
     
     data = request.get_json() or {}
-    print(f">>> /genai/{model_name}/inference payload recebido:")
-    print(json.dumps(data, ensure_ascii=False, indent=2))
+    logger.debug(f">>> /genai/{model_name}/inference payload recebido:")
+    logger.debug(json.dumps(data, ensure_ascii=False, indent=2))
     
     prompt = data.get("prompt")
     if not prompt:
@@ -1313,13 +1642,7 @@ def oci_inference(model_name):
         })
     
     try:
-        endpoint = f"https://inference.generativeai.{model_region}.oci.oraclecloud.com"
-        client = oci.generative_ai_inference.GenerativeAiInferenceClient(
-            config=config,
-            service_endpoint=endpoint,
-            retry_strategy=oci.retry.NoneRetryStrategy(),
-            timeout=(10, 240)
-        )
+        client = get_oci_inference_client(model_region)
         
         # Cria mensagem
         content = oci.generative_ai_inference.models.TextContent()
@@ -1347,12 +1670,18 @@ def oci_inference(model_name):
         chat_response = client.chat(chat_detail)
         chat_choices = chat_response.data.chat_response.choices
         
+        # Extrair token usage da resposta do modelo
+        usage = extract_token_usage(chat_response)
+        
         chat_data = {
             "text": chat_choices[0].message.content[0].text,
             "finish_reason": chat_choices[0].finish_reason
         }
         
-        return jsonify({"response": chat_data})
+        return jsonify({
+            "response": chat_data,
+            "usage": usage
+        })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -1361,6 +1690,6 @@ def oci_inference(model_name):
 # ==========================
 
 if __name__ == '__main__':
-    print("=" * 60)
-    print("OCI GenAI Proxy v2.0.3")
+    logger.info("=" * 60)
+    logger.info("OCI GenAI Proxy v2.0.3")
     app.run(host='0.0.0.0', port=8000, debug=False)
