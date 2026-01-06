@@ -1,4 +1,12 @@
 """
+Disclaimer:
+
+Este código é fornecido como um exemplo open-source de contribuição comunitária para implementação de soluções utilizando a plataforma Oracle.
+É distribuído "AS IS" (como está), sem garantias, responsabilidades ou suporte de qualquer natureza.
+A Oracle Corporation não assume qualquer responsabilidade pelo conteúdo, precisão, funcionalidade ou forma deste material.
+"""
+
+"""
 embedding_service.py - Serviço de Geração de Embeddings
 Gera embeddings vetoriais para chunks de texto usando Sentence Transformers
 """
