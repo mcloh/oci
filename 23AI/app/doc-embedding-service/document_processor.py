@@ -1,4 +1,12 @@
 """
+Disclaimer:
+
+Este código é fornecido como um exemplo open-source de contribuição comunitária para implementação de soluções utilizando a plataforma Oracle.
+É distribuído "AS IS" (como está), sem garantias, responsabilidades ou suporte de qualquer natureza.
+A Oracle Corporation não assume qualquer responsabilidade pelo conteúdo, precisão, funcionalidade ou forma deste material.
+"""
+
+"""
 document_processor.py - Processamento de Documentos e Chunking
 Extrai texto de PDF, Word e imagens escaneadas, e divide em chunks
 """
