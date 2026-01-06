@@ -1,12 +1,9 @@
 # OCI GenAI Automation Platform
 
-"""
-Disclaimer:
-
-Este material é fornecido como um exemplo open-source de contribuição comunitária para implementação de soluções utilizando a plataforma Oracle.
-É distribuído "AS IS" (como está), sem garantias, responsabilidades ou suporte de qualquer natureza.
-A Oracle Corporation não assume qualquer responsabilidade pelo conteúdo, precisão, funcionalidade ou forma deste material.
-"""
+> **Disclaimer:**
+> Este material é fornecido como um exemplo open-source de contribuição comunitária para implementação de soluções utilizando a plataforma Oracle.
+> É distribuído "AS IS" (como está), sem garantias, responsabilidades ou suporte de qualquer natureza.
+> A Oracle Corporation não assume qualquer responsabilidade pelo conteúdo, precisão, funcionalidade ou forma deste material.
 
 Uma plataforma completa de automação e integração com Inteligência Artificial baseada na Oracle Cloud Infrastructure (OCI). Este projeto combina serviços de GenAI com ferramentas de automação de workflows para criar uma solução robusta de integração empresarial.
 
