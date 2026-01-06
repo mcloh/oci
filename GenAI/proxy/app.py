@@ -1,3 +1,11 @@
+"""
+Disclaimer:
+
+Este código é fornecido como um exemplo open-source de contribuição comunitária para implementação de soluções utilizando a plataforma Oracle.
+É distribuído "AS IS" (como está), sem garantias, responsabilidades ou suporte de qualquer natureza.
+A Oracle Corporation não assume qualquer responsabilidade pelo conteúdo, precisão, funcionalidade ou forma deste material.
+"""
+
 # api.py — OCI GenAI + OpenAI v1 Compatibility (files + images + multimodal)
 # -----------------------------------------------------------------------------
 # Requisitos:
